@@ -1,0 +1,15 @@
+[package]
+name = "webgw"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# TODO: Reduce scope of features to required ones.
+tokio = { version = "1.24.1", features = ["full"] }
+# TODO: Needed?
+async-trait = "0.1"
+# Tracing instead of log
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "time", "parking_lot"] }
