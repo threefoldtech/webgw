@@ -125,6 +125,30 @@ const fn host_header_start(data: &[u8]) -> bool {
         && data[4] == b':'
 }
 
+impl std::fmt::Display for SnifferError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SnifferError::BufferFull => f.pad("buffer is full and there is no 'host' header yet"),
+            SnifferError::ReadError(ref e) => {
+                f.pad(&format!("error reading from the connection: {}", e))
+            }
+            SnifferError::HeaderParseError(ref e) => {
+                f.pad(&format!("host header value is invalid UTF-8: {}", e))
+            }
+        }
+    }
+}
+
+impl std::error::Error for SnifferError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SnifferError::HeaderParseError(ref e) => Some(e),
+            SnifferError::ReadError(ref e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
