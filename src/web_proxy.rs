@@ -1,16 +1,28 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
+use tokio::{
+    io::{self, AsyncWriteExt},
+    select,
+};
+use tracing::{debug, trace};
+
+use crate::bandwidth::{Bandwidth, MeasuredConnection};
+use crate::sniffer::{HTTPSniffer, HTTPSnifferError};
 
 /// Hash of the secret is a blake2b-32 digest.
 pub type SecretHash = [u8; 32];
+
+/// Default port to listen on for HTTP connections.
+const HTTP_PORT: u16 = 80;
 
 /// A generic TCP proxy, extended with sniffers for incoming traffic.
 #[derive(Debug)]
 pub struct Proxy {
     /// Host names for which a client is connected
-    connected_hosts: RwLock<HashMap<String, ConnectedRemote>>,
+    connected_hosts: RwLock<HashMap<String, (ConnectedRemote, Arc<Bandwidth>)>>,
     /// All hosts registered in the proxy, mapped to the secret required by clients for
     /// authentication.
     registered_hosts: RwLock<HashMap<String, SecretHash>>,
@@ -34,6 +46,85 @@ impl Proxy {
         Self {
             connected_hosts: RwLock::new(HashMap::new()),
             registered_hosts: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Listen for incoming HTTP connections, attempt to identify them, and if successful, attempt
+    /// to proxy them to a connected client, if any. If not client is connected for the host, or
+    /// the host is not known, the connection is closed.
+    pub async fn listen_http(&self) -> Result<(), io::Error> {
+        let listener = TcpListener::bind(("[::]", HTTP_PORT)).await?;
+        loop {
+            let (frontend_con, remote) = listener.accept().await?;
+            debug!("Accepted new connection from {}", remote);
+            // Get the target host.
+            let mut sniffer = HTTPSniffer::new(frontend_con);
+            let host = match (&mut sniffer).await {
+                Ok(host) => host,
+                Err(se) => {
+                    debug!("Could not extract HTTP host from connection: {}", se);
+                    continue;
+                }
+            };
+
+            // Deconstruct the sniffer
+            let (buffer, buf_size, mut frontend_con) = sniffer.into_parts();
+            // Check if we know this host. Note that we don't check the registered hosts, but only
+            // the ones for which a client is connected, as a known host without connected client
+            // will have the same result as an unknown host, i.e. a closed connection.
+            let connected_hosts = self.connected_hosts.read().await;
+            if let Some((remote, bandwidth)) = connected_hosts.get(host) {
+                match remote.request_connection().await {
+                    Ok(mut backend_con) => {
+                        trace!(
+                            "Got new proxy ready connection for {}, dumping {} byte sniffer buffer",
+                            host,
+                            buf_size
+                        );
+                        if let Err(e) = backend_con.write_all(&buffer[..buf_size]).await {
+                            // If there is an error, move on to the next connection.
+                            debug!("Writing sniffer buffer failed: {}", e);
+                            continue;
+                        }
+                        // Notice that we don't flush here. That's because we don't really care
+                        // that this data reaches the remote _now_, we only care that it is queued
+                        // before adding the other data of the connection. Besides, there is no
+                        // guarantee that the remote will be able to do anything useful with what
+                        // is in the buffer at this point in time anyway.
+
+                        // Don't forget to increment the written counter.
+                        bandwidth.add_written(buf_size as u64);
+
+                        // Get a new handle, as there existing handle is a reference, which can't
+                        // go into the task.
+                        let bandwidth = Arc::clone(bandwidth);
+                        tokio::spawn(async move {
+                            // Split the tcp streams as copy bidirectional seems to have some
+                            // issues. Use `split` and then a select instead of `into_split`
+                            // so we only spawn 1 task, and avoid a heap allocation for the split.
+                            let (backend_reader, backend_writer) = backend_con.split();
+                            let (mut fronted_reader, mut frontend_writer) = frontend_con.split();
+                            // Measure bandwidth on the backend.
+                            let mut backend_reader = MeasuredConnection::with_bandwidth(
+                                backend_reader,
+                                Arc::clone(&bandwidth),
+                            );
+                            let mut backend_writer =
+                                MeasuredConnection::with_bandwidth(backend_writer, bandwidth);
+
+                            // TODO: Verify graceful shutdown
+                            select! {
+                                _ = io::copy(&mut fronted_reader, &mut backend_writer) => {}
+                                _ = io::copy(&mut backend_reader, &mut frontend_writer) => {}
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        debug!("Failed to get connection from remote: {}", e);
+                        continue;
+                    }
+                }
+            };
         }
     }
 
