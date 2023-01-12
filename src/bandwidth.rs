@@ -91,9 +91,7 @@ where
     ) -> std::task::Poll<std::io::Result<()>> {
         let start = buf.filled().len();
         let res = ready!(Pin::new(&mut self.con).poll_read(cx, buf));
-        self.bandwidth
-            .read
-            .fetch_add((buf.filled().len() - start) as u64, Ordering::Relaxed);
+        self.bandwidth.add_read((buf.filled().len() - start) as u64);
         Poll::Ready(res)
     }
 }
@@ -109,9 +107,7 @@ where
     ) -> Poll<Result<usize, std::io::Error>> {
         let written = ready!(Pin::new(&mut self.con).poll_write(cx, buf));
         if let Ok(amt) = written {
-            self.bandwidth
-                .written
-                .fetch_add(amt as u64, Ordering::Relaxed);
+            self.bandwidth.add_written(amt as u64);
         };
         Poll::Ready(written)
     }
