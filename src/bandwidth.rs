@@ -58,9 +58,19 @@ impl Bandwidth {
         self.read.load(Ordering::Acquire)
     }
 
+    /// Add the given amount to the read counter.
+    pub fn add_read(&self, amt: u64) {
+        self.read.fetch_add(amt, Ordering::Relaxed);
+    }
+
     /// Returns the amount of bytes written.
     pub fn written(&self) -> u64 {
         self.written.load(Ordering::Acquire)
+    }
+
+    /// Add the given amount to the written counter.
+    pub fn add_written(&self, amt: u64) {
+        self.written.fetch_add(amt, Ordering::Relaxed);
     }
 }
 
@@ -123,10 +133,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn count_read_bytes() {
@@ -148,6 +157,18 @@ mod tests {
             .expect("can read from wrapped cursor");
         assert_eq!(measurements.read(), BUF_SIZE as u64);
         assert_eq!(measurements.written(), 0);
+    }
+
+    #[test]
+    fn count_added_read_bytes() {
+        let bw = Bandwidth::new();
+        bw.add_read(75);
+        bw.add_written(851);
+        bw.add_read(29);
+        bw.add_written(4);
+
+        assert_eq!(bw.read(), 104);
+        assert_eq!(bw.written(), 855);
     }
 
     #[tokio::test]
