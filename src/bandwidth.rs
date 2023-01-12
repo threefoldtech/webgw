@@ -64,6 +64,12 @@ impl Bandwidth {
     }
 }
 
+impl Default for Bandwidth {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> AsyncRead for MeasuredConnection<T>
 where
     T: AsyncRead + Unpin,
