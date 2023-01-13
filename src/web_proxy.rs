@@ -5,13 +5,13 @@ use std::{collections::HashMap, time::Duration};
 use rand::Rng;
 use tokio::sync::{oneshot, Mutex};
 use tokio::{
-    io::{self, AsyncWriteExt},
+    io::{self, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     select,
     sync::RwLock,
     time::timeout,
 };
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 
 use crate::bandwidth::{Bandwidth, MeasuredConnection};
 use crate::sniffer::{HTTPSniffer, HTTPSnifferError};
@@ -25,6 +25,8 @@ pub type ConnectionSecret = [u8; CONNECTION_SECRET_SIZE];
 
 /// Default port to listen on for HTTP connections.
 const HTTP_PORT: u16 = 80;
+/// Default port to listen for client connections.
+const BACKEND_PORT: u16 = 43658;
 
 /// Amount of bytes used for a ConnectionSecret.
 pub const CONNECTION_SECRET_SIZE: usize = 32;
@@ -38,12 +40,15 @@ pub struct Proxy {
     /// authentication.
     registered_hosts: RwLock<HashMap<String, SecretHash>>,
     /// Pending backend connections.
-    pending_proxy_connections: Mutex<HashMap<ConnectionSecret, oneshot::Sender<TcpStream>>>,
+    pending_proxy_connections: Arc<Mutex<HashMap<ConnectionSecret, oneshot::Sender<TcpStream>>>>,
     /// The maximum amount of time to sniff the destination from a new frontend connection.
     sniffer_timeout: Duration,
     /// The amount of time to wait for a client to create a connection to the proxy when a new
     /// connection for its host has been identified.
     backend_connection_timeout: Duration,
+    /// The amount of time a client connection has to send the connection identification secret,
+    /// after the initial connection. This should be shorter than `backend_connection_timeout`.
+    backend_identification_timeout: Duration,
 }
 
 // TODO: This should be part of the core
@@ -67,20 +72,75 @@ impl Proxy {
         Self {
             connected_hosts: RwLock::new(HashMap::new()),
             registered_hosts: RwLock::new(HashMap::new()),
-            pending_proxy_connections: Mutex::new(HashMap::new()),
+            pending_proxy_connections: Arc::new(Mutex::new(HashMap::new())),
             sniffer_timeout: Duration::from_secs(10),
             backend_connection_timeout: Duration::from_secs(5),
+            backend_identification_timeout: Duration::from_secs(3),
+        }
+    }
+
+    /// Listen for incoming TCP connections from clients. These connections are the result of
+    /// requesting a new connection to be opened from the client by the proxy, in repsonse to a new
+    /// frontend connection coming in, and being identified as being hosted by said client. This
+    /// function blocks until the listener fails to accept a connection.
+    pub async fn listen_backend_connection(&self) -> Result<(), io::Error> {
+        let listener = TcpListener::bind(("[::]", BACKEND_PORT)).await?;
+        loop {
+            let (mut client_con, remote) = listener.accept().await?;
+            debug!("Accepted new backend connection from {}", remote);
+            let backend_identification_timeout = self.backend_identification_timeout;
+            let pending_proxy_connections = Arc::clone(&self.pending_proxy_connections);
+            tokio::spawn(async move {
+                let mut secret = [0; CONNECTION_SECRET_SIZE];
+                match timeout(
+                    backend_identification_timeout,
+                    client_con.read_exact(&mut secret),
+                )
+                .await
+                {
+                    Ok(Ok(read)) => {
+                        if read != secret.len() {
+                            warn!(
+                            "Secret read is not the correct lenght, expected {} bytes got {} bytes",
+                            secret.len(),
+                            read
+                        );
+                            return;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        debug!("Failed to read secret from client connection: {}", e);
+                        return;
+                    }
+                    Err(_) => {
+                        debug!("Timeout while reading client connection secret");
+                        return;
+                    }
+                }
+                // Now we have the secret, match it
+                let mut pending_proxy_connections = pending_proxy_connections.lock().await;
+                // We actually `remove` here, because we want to take ownership of the value, and also
+                // want to clean it up already.
+                if let Some(tx) = pending_proxy_connections.remove(&secret) {
+                    // If send fails we get back the connection, but the receiver is gone already
+                    // anyhow in that case so we can't really do anything meaningful.
+                    if tx.send(client_con).is_err() {
+                        debug!("Could not process client connection, probably took too long to process it");
+                    };
+                }
+            });
         }
     }
 
     /// Listen for incoming HTTP connections, attempt to identify them, and if successful, attempt
     /// to proxy them to a connected client, if any. If not client is connected for the host, or
-    /// the host is not known, the connection is closed.
+    /// the host is not known, the connection is closed. This function blocks until the listener
+    /// fails to accept a connection.
     pub async fn listen_http(&self) -> Result<(), io::Error> {
         let listener = TcpListener::bind(("[::]", HTTP_PORT)).await?;
         loop {
             let (frontend_con, remote) = listener.accept().await?;
-            debug!("Accepted new connection from {}", remote);
+            debug!("Accepted new presumed HTTP connection from {}", remote);
             // Get the target host.
             let mut sniffer = HTTPSniffer::new(frontend_con);
             let host = match timeout(self.sniffer_timeout, &mut sniffer).await {
@@ -195,13 +255,14 @@ impl Proxy {
             let secret: [u8; 32] = rand::thread_rng().gen();
             // Insert secret in map with pending connections, with value oneshot channel to return
             // the stream.
-            let (tx, rx) = oneshot::channel();
+            let (tx, mut rx) = oneshot::channel();
             {
                 let mut pending_connections = self.pending_proxy_connections.lock().await;
                 pending_connections.insert(secret, tx);
             } // drop the MutexGuard on pending connections.
+              // TODO: return a proper eror here.
             remote.request_connection(secret).await.expect("TODO");
-            match timeout(self.backend_connection_timeout, rx).await {
+            match timeout(self.backend_connection_timeout, &mut rx).await {
                 // The pending connection map should be cleaned up in the code handling the
                 // incoming connection.
                 Ok(Ok(con)) => Ok((con, Arc::clone(&bandwidth))),
@@ -213,7 +274,17 @@ impl Proxy {
                     debug!("Client did not open a new connection in time");
                     // Clean up the pending connections
                     let mut pending_connections = self.pending_proxy_connections.lock().await;
-                    pending_connections.remove(&secret);
+                    // There is a possible race condition here: the timeout fires, while the client is
+                    // already connected and sending the secret. The pending connection mutex is
+                    // locked, and the connection is sent on the channel. Then this code tries to clean
+                    // up the channel (even though it is already gone). The result is the connection is
+                    // established and in the channel. So if tx is gone, we try one more time to see if
+                    // a connection is on the channel, and if so we still accept it.
+                    if pending_connections.remove(&secret).is_none() {
+                        if let Ok(con) = rx.try_recv() {
+                            return Ok((con, Arc::clone(bandwidth)));
+                        }
+                    }
                     Err(ProxyError::ClientTimeout)
                 }
             }
