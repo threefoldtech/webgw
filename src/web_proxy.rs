@@ -1,13 +1,17 @@
-use std::collections::HashMap;
+use std::fmt::Display;
 use std::sync::Arc;
+use std::{collections::HashMap, time::Duration};
 
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use rand::Rng;
+use tokio::sync::{oneshot, Mutex};
 use tokio::{
     io::{self, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
     select,
+    sync::RwLock,
+    time::timeout,
 };
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
 use crate::bandwidth::{Bandwidth, MeasuredConnection};
 use crate::sniffer::{HTTPSniffer, HTTPSnifferError};
@@ -15,8 +19,15 @@ use crate::sniffer::{HTTPSniffer, HTTPSnifferError};
 /// Hash of the secret is a blake2b-32 digest.
 pub type SecretHash = [u8; 32];
 
+/// Type of a connection secret, which is used to identify connections made from clients to the
+/// proxy to actually proxy a frontend connection.
+pub type ConnectionSecret = [u8; CONNECTION_SECRET_SIZE];
+
 /// Default port to listen on for HTTP connections.
 const HTTP_PORT: u16 = 80;
+
+/// Amount of bytes used for a ConnectionSecret.
+pub const CONNECTION_SECRET_SIZE: usize = 32;
 
 /// A generic TCP proxy, extended with sniffers for incoming traffic.
 #[derive(Debug)]
@@ -26,6 +37,13 @@ pub struct Proxy {
     /// All hosts registered in the proxy, mapped to the secret required by clients for
     /// authentication.
     registered_hosts: RwLock<HashMap<String, SecretHash>>,
+    /// Pending backend connections.
+    pending_proxy_connections: Mutex<HashMap<ConnectionSecret, oneshot::Sender<TcpStream>>>,
+    /// The maximum amount of time to sniff the destination from a new frontend connection.
+    sniffer_timeout: Duration,
+    /// The amount of time to wait for a client to create a connection to the proxy when a new
+    /// connection for its host has been identified.
+    backend_connection_timeout: Duration,
 }
 
 // TODO: This should be part of the core
@@ -35,7 +53,10 @@ pub struct ConnectedRemote {
 }
 
 impl ConnectedRemote {
-    pub async fn request_connection(&self) -> Result<TcpStream, Box<dyn std::error::Error>> {
+    pub async fn request_connection(
+        &self,
+        _secret: ConnectionSecret,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         todo!();
     }
 }
@@ -46,6 +67,9 @@ impl Proxy {
         Self {
             connected_hosts: RwLock::new(HashMap::new()),
             registered_hosts: RwLock::new(HashMap::new()),
+            pending_proxy_connections: Mutex::new(HashMap::new()),
+            sniffer_timeout: Duration::from_secs(10),
+            backend_connection_timeout: Duration::from_secs(5),
         }
     }
 
@@ -59,70 +83,66 @@ impl Proxy {
             debug!("Accepted new connection from {}", remote);
             // Get the target host.
             let mut sniffer = HTTPSniffer::new(frontend_con);
-            let host = match (&mut sniffer).await {
-                Ok(host) => host,
-                Err(se) => {
+            let host = match timeout(self.sniffer_timeout, &mut sniffer).await {
+                Ok(Ok(host)) => host,
+                Ok(Err(se)) => {
                     debug!("Could not extract HTTP host from connection: {}", se);
+                    continue;
+                }
+                Err(_) => {
+                    debug!("Incoming connection did not send host header in time");
                     continue;
                 }
             };
 
             // Deconstruct the sniffer
             let (buffer, buf_size, mut frontend_con) = sniffer.into_parts();
-            // Check if we know this host. Note that we don't check the registered hosts, but only
-            // the ones for which a client is connected, as a known host without connected client
-            // will have the same result as an unknown host, i.e. a closed connection.
-            let connected_hosts = self.connected_hosts.read().await;
-            if let Some((remote, bandwidth)) = connected_hosts.get(host) {
-                match remote.request_connection().await {
-                    Ok(mut backend_con) => {
-                        trace!(
-                            "Got new proxy ready connection for {}, dumping {} byte sniffer buffer",
-                            host,
-                            buf_size
-                        );
-                        if let Err(e) = backend_con.write_all(&buffer[..buf_size]).await {
-                            // If there is an error, move on to the next connection.
-                            debug!("Writing sniffer buffer failed: {}", e);
-                            continue;
-                        }
-                        // Notice that we don't flush here. That's because we don't really care
-                        // that this data reaches the remote _now_, we only care that it is queued
-                        // before adding the other data of the connection. Besides, there is no
-                        // guarantee that the remote will be able to do anything useful with what
-                        // is in the buffer at this point in time anyway.
 
-                        // Don't forget to increment the written counter.
-                        bandwidth.add_written(buf_size as u64);
-
-                        // Get a new handle, as there existing handle is a reference, which can't
-                        // go into the task.
-                        let bandwidth = Arc::clone(bandwidth);
-                        tokio::spawn(async move {
-                            // Split the tcp streams as copy bidirectional seems to have some
-                            // issues. Use `split` and then a select instead of `into_split`
-                            // so we only spawn 1 task, and avoid a heap allocation for the split.
-                            let (backend_reader, backend_writer) = backend_con.split();
-                            let (mut fronted_reader, mut frontend_writer) = frontend_con.split();
-                            // Measure bandwidth on the backend.
-                            let mut backend_reader = MeasuredConnection::with_bandwidth(
-                                backend_reader,
-                                Arc::clone(&bandwidth),
-                            );
-                            let mut backend_writer =
-                                MeasuredConnection::with_bandwidth(backend_writer, bandwidth);
-
-                            // TODO: Verify graceful shutdown
-                            select! {
-                                _ = io::copy(&mut fronted_reader, &mut backend_writer) => {}
-                                _ = io::copy(&mut backend_reader, &mut frontend_writer) => {}
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        debug!("Failed to get connection from remote: {}", e);
+            match self.request_connection(host).await {
+                Ok((mut backend_con, bandwidth)) => {
+                    trace!(
+                        "Got new proxy ready connection for {}, dumping {} byte sniffer buffer",
+                        host,
+                        buf_size
+                    );
+                    if let Err(e) = backend_con.write_all(&buffer[..buf_size]).await {
+                        // If there is an error, move on to the next connection.
+                        debug!("Writing sniffer buffer failed: {}", e);
                         continue;
                     }
+                    // Notice that we don't flush here. That's because we don't really care
+                    // that this data reaches the remote _now_, we only care that it is queued
+                    // before adding the other data of the connection. Besides, there is no
+                    // guarantee that the remote will be able to do anything useful with what
+                    // is in the buffer at this point in time anyway.
+
+                    // Don't forget to increment the written counter.
+                    bandwidth.add_written(buf_size as u64);
+
+                    tokio::spawn(async move {
+                        // Split the tcp streams as copy bidirectional seems to have some
+                        // issues. Use `split` and then a select instead of `into_split`
+                        // so we only spawn 1 task, and avoid a heap allocation for the split.
+                        let (backend_reader, backend_writer) = backend_con.split();
+                        let (mut fronted_reader, mut frontend_writer) = frontend_con.split();
+                        // Measure bandwidth on the backend.
+                        let mut backend_reader = MeasuredConnection::with_bandwidth(
+                            backend_reader,
+                            Arc::clone(&bandwidth),
+                        );
+                        let mut backend_writer =
+                            MeasuredConnection::with_bandwidth(backend_writer, bandwidth);
+
+                        // TODO: Verify graceful shutdown
+                        select! {
+                            _ = io::copy(&mut fronted_reader, &mut backend_writer) => {}
+                            _ = io::copy(&mut backend_reader, &mut frontend_writer) => {}
+                        }
+                    });
+                }
+                Err(e) => {
+                    debug!("Failed to get connection from remote: {}", e);
+                    continue;
                 }
             };
         }
@@ -158,7 +178,72 @@ impl Proxy {
         let mut registered_hosts = self.registered_hosts.write().await;
         registered_hosts.remove(host)
     }
+
+    /// Request a new connection for a given host. This function will request a connected client
+    /// for the host to open a new connection. If no client is connected, or the host is otherwise
+    /// unknown to the proxy, an error is returned.
+    async fn request_connection<'a>(
+        &self,
+        host: &'a str,
+    ) -> Result<(TcpStream, Arc<Bandwidth>), ProxyError<'a>> {
+        let connected_hosts = self.connected_hosts.read().await;
+        // Check if we know this host. Note that we don't check the registered hosts, but only
+        // the ones for which a client is connected, as a known host without connected client
+        // will have the same result as an unknown host, i.e. a closed connection.
+        if let Some((remote, bandwidth)) = connected_hosts.get(host) {
+            // Generate secret
+            let secret: [u8; 32] = rand::thread_rng().gen();
+            // Insert secret in map with pending connections, with value oneshot channel to return
+            // the stream.
+            let (tx, rx) = oneshot::channel();
+            {
+                let mut pending_connections = self.pending_proxy_connections.lock().await;
+                pending_connections.insert(secret, tx);
+            } // drop the MutexGuard on pending connections.
+            remote.request_connection(secret).await.expect("TODO");
+            match timeout(self.backend_connection_timeout, rx).await {
+                // The pending connection map should be cleaned up in the code handling the
+                // incoming connection.
+                Ok(Ok(con)) => Ok((con, Arc::clone(&bandwidth))),
+                Ok(Err(_)) => {
+                    error!("Oneshot channel closed without sending value, this should not happen!");
+                    unreachable!();
+                }
+                Err(_) => {
+                    debug!("Client did not open a new connection in time");
+                    // Clean up the pending connections
+                    let mut pending_connections = self.pending_proxy_connections.lock().await;
+                    pending_connections.remove(&secret);
+                    Err(ProxyError::ClientTimeout)
+                }
+            }
+        } else {
+            Err(ProxyError::ClientNotConnected { host })
+        }
+    }
 }
+
+#[derive(Debug)]
+pub enum ProxyError<'a> {
+    /// No client connected for the given host.
+    ClientNotConnected { host: &'a str },
+    /// Timeout waiting for the client to open a new proxy connection.
+    ClientTimeout,
+}
+
+impl<'a> Display for ProxyError<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClientNotConnected { host } => {
+                f.write_str("there is no connected client for host ")?;
+                f.write_str(host)
+            }
+            Self::ClientTimeout => f.write_str("client did not open a new connection in time"),
+        }
+    }
+}
+
+impl<'a> std::error::Error for ProxyError<'a> {}
 
 /// Error type returned in case [`Proxy::register_host`] fails because the host is already
 /// registered with a different secret.
@@ -172,7 +257,7 @@ pub struct DuplicateHostRegistration {
     pub old_secret_hash: SecretHash,
 }
 
-impl std::fmt::Display for DuplicateHostRegistration {
+impl Display for DuplicateHostRegistration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("can't register already known hostname ")?;
         f.write_str(&self.host)
