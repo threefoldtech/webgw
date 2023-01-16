@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::{collections::HashMap, time::Duration};
 
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Mutex};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
@@ -292,6 +293,22 @@ impl Proxy {
             Err(ProxyError::ClientNotConnected { host })
         }
     }
+}
+
+/// Request to a client to open a new proxy connection. It contains all the required information
+/// for the client to set up the connection both to the server and the remote service.
+// TODO: Check if we can replace the `String`s here with &'a str.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProxyConnectionRequest {
+    /// Hex encoded connection secret.
+    secret: String,
+    /// Host we are connecting to. This might be needed in case multiple hosts are connected from
+    /// the same client, but could be ignored for now.
+    host: String,
+    /// The port the initial connection came in on.
+    port: u16,
+    /// The port the server is listening on for client connections.
+    server_listening_port: u16,
 }
 
 #[derive(Debug)]
