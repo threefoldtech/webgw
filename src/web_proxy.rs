@@ -290,6 +290,41 @@ impl Proxy {
         connected_hosts.remove(host).map(|(_, bandwidth)| bandwidth)
     }
 
+    pub fn register_client_blocking<'a>(
+        &self,
+        host: &'a str,
+        secret: &[u8],
+        remote: ConnectedRemote,
+    ) -> Result<(), ProxyClientError<'a>> {
+        let secret_hash = Hasher::digest(secret);
+        let registered_hosts = self.registered_hosts.blocking_read();
+        let registered_secret_hash = match registered_hosts.get(host) {
+            Some(secret) => secret,
+            None => return Err(ProxyClientError::UnknownHost { host }),
+        };
+        if secret_hash.as_slice() != registered_secret_hash {
+            return Err(ProxyClientError::WrongSecret);
+        }
+        // Aquire a write lock on connected_remotes to insert the new connection. Note we still
+        // need to hold the read lock on registered hosts, as otherwise there is a potential race
+        // condition where `host` is unregsitered before the new data is inserted in connected
+        // hosts. We only grab this lock after the above checks to avoid contention here as much as
+        // possible, as this map is also used whenever a new frontend connection is identified.
+        let mut connected_remotes = self.connected_hosts.blocking_write();
+        // Extract existing measurements, in case we already have a live client for this host. The
+        // client will be replaced regardless. We use remove for this, as we will end up replacing
+        // the data anyway, and by removing we take ownership of the data, avoiding making a copy
+        // of the Arc and bumping its refcount. This is ever so slightly more performant.
+        let bandwidth = if let Some((_, bandwidth)) = connected_remotes.remove(host) {
+            bandwidth
+        } else {
+            Arc::new(Bandwidth::new())
+        };
+        connected_remotes.insert(host.to_string(), (remote, bandwidth));
+
+        Ok(())
+    }
+
     /// Request a new connection for a given host. This function will request a connected client
     /// for the host to open a new connection. If no client is connected, or the host is otherwise
     /// unknown to the proxy, an error is returned.
