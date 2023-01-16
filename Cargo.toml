@@ -14,3 +14,7 @@ async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "time", "parking_lot"] }
 rand = "0.8.5"
+jsonrpsee = { version = "0.16.2", features = ["full"] }
+serde = { version = "1.0.152", features = ["derive"] }
+blake2 = "0.10.6"
+faster-hex = "0.6.1"

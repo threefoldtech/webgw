@@ -5,7 +5,7 @@ use std::{collections::HashMap, time::Duration};
 use blake2::{digest::typenum::U32, Blake2b, Digest};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -59,10 +59,19 @@ pub struct Proxy {
 // TODO: This should be part of the core
 #[derive(Debug)]
 pub struct ConnectedRemote {
-    // TODO
+    // TODO: Add a lvl of indirection by replacing this with an mpsc::Sender and spawning a task,
+    // or implementing a newtype which implements futures::Sink and making this generic. This would
+    // greatly improve testability.
+    remote: jsonrpsee::SubscriptionSink,
 }
 
 impl ConnectedRemote {
+    /// Create a new ConnectedRemote from the given SubscriptionSink.
+    pub fn new(remote: jsonrpsee::SubscriptionSink) -> Self {
+        Self { remote }
+    }
+
+    /// Request a new connection from the remote
     pub async fn request_connection(
         &self,
         _secret: ConnectionSecret,
