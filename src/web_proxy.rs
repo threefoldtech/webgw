@@ -2,6 +2,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 use std::{collections::HashMap, time::Duration};
 
+use blake2::{digest::typenum::U32, Blake2b, Digest};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Mutex};
@@ -23,6 +24,9 @@ pub type SecretHash = [u8; 32];
 /// Type of a connection secret, which is used to identify connections made from clients to the
 /// proxy to actually proxy a frontend connection.
 pub type ConnectionSecret = [u8; CONNECTION_SECRET_SIZE];
+
+/// Blake2b hasher with 32 byte digest.
+type Hasher = Blake2b<U32>;
 
 /// Default port to listen on for HTTP connections.
 const HTTP_PORT: u16 = 80;
@@ -234,10 +238,56 @@ impl Proxy {
     }
 
     /// Unregister a host from the Proxy. If the host is known, the secret hash associated is
-    /// returned. This can be used for debugging from the call site.
+    /// returned. This can be used for debugging from the call site. This also removes a
+    /// connected client, if any.
     pub async fn unregister_host(&self, host: &str) -> Option<SecretHash> {
         let mut registered_hosts = self.registered_hosts.write().await;
+        let mut connected_hosts = self.connected_hosts.write().await;
+        connected_hosts.remove(host);
         registered_hosts.remove(host)
+    }
+
+    /// Register a new client for a given host. The secret is hashed, and if the resulting value
+    /// matches the configured secret hash, the client is accepted.
+    pub async fn register_client<'a>(
+        &self,
+        host: &'a str,
+        secret: &[u8],
+        remote: ConnectedRemote,
+    ) -> Result<(), ProxyClientError<'a>> {
+        let secret_hash = Hasher::digest(secret);
+        let registered_hosts = self.registered_hosts.read().await;
+        let registered_secret_hash = match registered_hosts.get(host) {
+            Some(secret) => secret,
+            None => return Err(ProxyClientError::UnknownHost { host }),
+        };
+        if secret_hash.as_slice() != registered_secret_hash {
+            return Err(ProxyClientError::WrongSecret);
+        }
+        // Aquire a write lock on connected_remotes to insert the new connection. Note we still
+        // need to hold the read lock on registered hosts, as otherwise there is a potential race
+        // condition where `host` is unregsitered before the new data is inserted in connected
+        // hosts. We only grab this lock after the above checks to avoid contention here as much as
+        // possible, as this map is also used whenever a new frontend connection is identified.
+        let mut connected_remotes = self.connected_hosts.write().await;
+        // Extract existing measurements, in case we already have a live client for this host. The
+        // client will be replaced regardless. We use remove for this, as we will end up replacing
+        // the data anyway, and by removing we take ownership of the data, avoiding making a copy
+        // of the Arc and bumping its refcount. This is ever so slightly more performant.
+        let bandwidth = if let Some((_, bandwidth)) = connected_remotes.remove(host) {
+            bandwidth
+        } else {
+            Arc::new(Bandwidth::new())
+        };
+        connected_remotes.insert(host.to_string(), (remote, bandwidth));
+
+        Ok(())
+    }
+
+    /// Unregisters a client for a host. This returns the current bandwidth counters for the host.
+    pub async fn unregister_client<'a>(&self, host: &str) -> Option<Arc<Bandwidth>> {
+        let mut connected_hosts = self.connected_hosts.write().await;
+        connected_hosts.remove(host).map(|(_, bandwidth)| bandwidth)
     }
 
     /// Request a new connection for a given host. This function will request a connected client
@@ -332,6 +382,26 @@ impl<'a> Display for ProxyError<'a> {
 }
 
 impl<'a> std::error::Error for ProxyError<'a> {}
+
+#[derive(Debug)]
+pub enum ProxyClientError<'a> {
+    UnknownHost { host: &'a str },
+    WrongSecret,
+}
+
+impl<'a> Display for ProxyClientError<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownHost { host } => {
+                f.write_str("unknown host ")?;
+                f.write_str(host)
+            }
+            Self::WrongSecret => f.write_str("wrong secret used to authenticate client"),
+        }
+    }
+}
+
+impl<'a> std::error::Error for ProxyClientError<'a> {}
 
 /// Error type returned in case [`Proxy::register_host`] fails because the host is already
 /// registered with a different secret.
