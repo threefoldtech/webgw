@@ -13,7 +13,7 @@ use tokio::{
     sync::RwLock,
     time::timeout,
 };
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::bandwidth::{Bandwidth, MeasuredConnection};
 use crate::sniffer::{HTTPSniffer, HTTPSnifferError};
@@ -77,6 +77,10 @@ impl Proxy {
     /// frontend connection coming in, and being identified as being hosted by said client. This
     /// function blocks until the listener fails to accept a connection.
     pub async fn listen_backend_connection(&self) -> Result<(), io::Error> {
+        info!(
+            "Binding TCP listener on port {} for backend connections",
+            self.server_client_port
+        );
         let listener = TcpListener::bind(("::", self.server_client_port)).await?;
         loop {
             let (mut client_con, remote) = listener.accept().await?;
@@ -130,6 +134,10 @@ impl Proxy {
     /// the host is not known, the connection is closed. This function blocks until the listener
     /// fails to accept a connection.
     pub async fn listen_http(&self) -> Result<(), io::Error> {
+        info!(
+            "Binding TCP listener on port {} for HTTP connections",
+            HTTP_PORT
+        );
         let listener = TcpListener::bind(("::", HTTP_PORT)).await?;
         loop {
             let (frontend_con, remote) = listener.accept().await?;

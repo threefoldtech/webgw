@@ -76,16 +76,18 @@ impl ProtocolServer for CoreServer {
             );
             // Error here is fine since it means the client is gone anyway.
             let _ = subscription_sink.reject(ErrorCode::InvalidParams);
+            return Err(SubscriptionEmptyError);
         }
         // Decode secret
         let mut secret = [0; SECRET_MAXIMUM_SIZE];
-        // secret.len() might be odd here, which is invalid hex and will be caught by the actual
+        // hex_secret.len() might be odd here, which is invalid hex and will be caught by the actual
         // decoding function.
-        let secret_size = secret.len() / 2;
+        let secret_size = hex_secret.len() / 2;
         if let Err(e) = faster_hex::hex_decode(hex_secret.as_bytes(), &mut secret[..secret_size]) {
             debug!("Client connection for host {} failed: {}", host, e);
             // Error here is fine since it means the client is gone anyway.
             let _ = subscription_sink.reject(ErrorCode::InvalidParams);
+            return Err(SubscriptionEmptyError);
         };
 
         let (tx, mut rx) = mpsc::channel(PROXY_CONNECT_BUFFER_SIZE);
