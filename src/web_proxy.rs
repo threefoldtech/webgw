@@ -56,18 +56,16 @@ pub struct Proxy {
     backend_identification_timeout: Duration,
 }
 
-// TODO: This should be part of the core
+/// An abstraction over a connection to a peer. This allows proxy specific communication with the
+/// peer.
 #[derive(Debug)]
 pub struct ConnectedRemote {
-    // TODO: Add a lvl of indirection by replacing this with an mpsc::Sender and spawning a task,
-    // or implementing a newtype which implements futures::Sink and making this generic. This would
-    // greatly improve testability.
-    remote: jsonrpsee::SubscriptionSink,
+    remote: mpsc::Sender<ProxyConnectionRequest>,
 }
 
 impl ConnectedRemote {
-    /// Create a new ConnectedRemote from the given SubscriptionSink.
-    pub fn new(remote: jsonrpsee::SubscriptionSink) -> Self {
+    /// Create a new ConnectedRemote.
+    pub fn new(remote: mpsc::Sender<ProxyConnectionRequest>) -> Self {
         Self { remote }
     }
 

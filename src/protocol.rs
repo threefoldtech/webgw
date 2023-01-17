@@ -3,12 +3,16 @@ use jsonrpsee::{
     proc_macros::rpc,
     types::{error::ErrorCode, ErrorObjectOwned, SubscriptionEmptyError},
 };
-use tracing::debug;
+use tokio::sync::mpsc;
+use tracing::{debug, error, trace};
 
 /// Minimum size in bytes of a secret.
 pub const SECRET_MINIMUM_SIZE: usize = 32;
 /// Maximum size in bytes of a secret;
 pub const SECRET_MAXIMUM_SIZE: usize = 256;
+
+/// The maximum amount of proxy requests to buffer per client.
+const PROXY_CONNECT_BUFFER_SIZE: usize = 1;
 
 #[rpc(client, server)]
 pub trait Protocol {
@@ -54,18 +58,51 @@ impl ProtocolServer for CoreServer {
             // Error here is fine since it means the client is gone anyway.
             let _ = subscription_sink.reject(ErrorCode::InvalidParams);
         };
+
+        let (tx, mut rx) = mpsc::channel(PROXY_CONNECT_BUFFER_SIZE);
         let result = self.proxy.register_client_blocking(
             host,
             &secret[..secret_size],
-            ConnectedRemote::new(subscription_sink),
+            ConnectedRemote::new(tx),
         );
 
         match result {
             Err(e) => {
                 debug!("Failed to register client for host {host}: {e}");
+                let _ = subscription_sink.reject(e);
                 Err(SubscriptionEmptyError)
             }
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Err(e) = subscription_sink.accept() {
+                    debug!("Failed to accept client subscription: remote hung up");
+                    return Err(e.into());
+                }
+                tokio::spawn(async move {
+                    loop {
+                        while let Some(request) = rx.recv().await {
+                            match subscription_sink.send(&request) {
+                                Ok(true) => {
+                                    trace!("Requested new connection from remote");
+                                }
+                                Ok(false) => {
+                                    // We explicitly accepted the subscription already, so this
+                                    // must mean the remote is gone.
+                                    debug!("Could not request proxy connection: remote hung up");
+                                    return;
+                                }
+                                Err(e) => {
+                                    error!("Couldn't serialize message: {}", e);
+                                    // All messages have the same structure so this is a terminal
+                                    // condition.
+                                    subscription_sink.close(ErrorCode::InternalError);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                });
+                Ok(())
+            }
         }
     }
 }
