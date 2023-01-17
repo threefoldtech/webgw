@@ -110,7 +110,7 @@ impl Proxy {
     /// frontend connection coming in, and being identified as being hosted by said client. This
     /// function blocks until the listener fails to accept a connection.
     pub async fn listen_backend_connection(&self) -> Result<(), io::Error> {
-        let listener = TcpListener::bind(("[::]", DEFAULT_CLIENT_PORT)).await?;
+        let listener = TcpListener::bind(("[::]", self.server_client_port)).await?;
         loop {
             let (mut client_con, remote) = listener.accept().await?;
             debug!("Accepted new backend connection from {}", remote);
