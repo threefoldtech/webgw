@@ -31,7 +31,7 @@ type Hasher = Blake2b<U32>;
 /// Default port to listen on for HTTP connections.
 const HTTP_PORT: u16 = 80;
 /// Default port to listen for client connections.
-const BACKEND_PORT: u16 = 43658;
+const BACKEND_PORT: u16 = 4658;
 
 /// Amount of bytes used for a ConnectionSecret.
 pub const CONNECTION_SECRET_SIZE: usize = 32;
