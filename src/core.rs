@@ -61,6 +61,8 @@ impl CoreServer {
 }
 
 impl ProtocolServer for CoreServer {
+    // TODO: See if it is better to avoid the block_in_place call by spawning a task with an mpsc,
+    // and only sending the received items here to the task which would then be properly async.
     fn subscribe_proxy_connections(
         &self,
         mut subscription_sink: jsonrpsee::SubscriptionSink,
@@ -91,11 +93,13 @@ impl ProtocolServer for CoreServer {
         };
 
         let (tx, mut rx) = mpsc::channel(PROXY_CONNECT_BUFFER_SIZE);
-        let result = self.proxy.register_client_blocking(
-            host,
-            &secret[..secret_size],
-            ConnectedRemote::new(tx),
-        );
+        let result = tokio::task::block_in_place(|| {
+            self.proxy.register_client_blocking(
+                host,
+                &secret[..secret_size],
+                ConnectedRemote::new(tx),
+            )
+        });
 
         match result {
             Err(e) => {
