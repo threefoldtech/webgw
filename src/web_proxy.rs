@@ -58,39 +58,6 @@ pub struct Proxy {
     server_client_port: u16,
 }
 
-/// An abstraction over a connection to a peer. This allows proxy specific communication with the
-/// peer.
-#[derive(Debug)]
-pub struct ConnectedRemote {
-    remote: mpsc::Sender<ProxyConnectionRequest>,
-}
-
-impl ConnectedRemote {
-    /// Create a new ConnectedRemote.
-    pub fn new(remote: mpsc::Sender<ProxyConnectionRequest>) -> Self {
-        Self { remote }
-    }
-
-    /// Request a new connection from the remote
-    pub async fn request_connection(
-        &self,
-        raw_secret: ConnectionSecret,
-        host: String,
-        port: u16,
-        server_listening_port: u16,
-    ) -> Result<(), ProxyClientDisconnected> {
-        self.remote
-            .send(ProxyConnectionRequest {
-                secret: faster_hex::hex_string(&raw_secret[..]),
-                host,
-                port,
-                server_listening_port,
-            })
-            .await
-            .map_err(|_| ProxyClientDisconnected)
-    }
-}
-
 impl Proxy {
     /// Create a new Proxy
     pub fn new() -> Self {
@@ -110,7 +77,7 @@ impl Proxy {
     /// frontend connection coming in, and being identified as being hosted by said client. This
     /// function blocks until the listener fails to accept a connection.
     pub async fn listen_backend_connection(&self) -> Result<(), io::Error> {
-        let listener = TcpListener::bind(("[::]", self.server_client_port)).await?;
+        let listener = TcpListener::bind(("::", self.server_client_port)).await?;
         loop {
             let (mut client_con, remote) = listener.accept().await?;
             debug!("Accepted new backend connection from {}", remote);
@@ -163,7 +130,7 @@ impl Proxy {
     /// the host is not known, the connection is closed. This function blocks until the listener
     /// fails to accept a connection.
     pub async fn listen_http(&self) -> Result<(), io::Error> {
-        let listener = TcpListener::bind(("[::]", HTTP_PORT)).await?;
+        let listener = TcpListener::bind(("::", HTTP_PORT)).await?;
         loop {
             let (frontend_con, remote) = listener.accept().await?;
             debug!("Accepted new presumed HTTP connection from {}", remote);
@@ -408,6 +375,45 @@ impl Proxy {
         } else {
             Err(ProxyError::ClientNotConnected { host })
         }
+    }
+}
+
+impl Default for Proxy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// An abstraction over a connection to a peer. This allows proxy specific communication with the
+/// peer.
+#[derive(Debug)]
+pub struct ConnectedRemote {
+    remote: mpsc::Sender<ProxyConnectionRequest>,
+}
+
+impl ConnectedRemote {
+    /// Create a new ConnectedRemote.
+    pub fn new(remote: mpsc::Sender<ProxyConnectionRequest>) -> Self {
+        Self { remote }
+    }
+
+    /// Request a new connection from the remote
+    pub async fn request_connection(
+        &self,
+        raw_secret: ConnectionSecret,
+        host: String,
+        port: u16,
+        server_listening_port: u16,
+    ) -> Result<(), ProxyClientDisconnected> {
+        self.remote
+            .send(ProxyConnectionRequest {
+                secret: faster_hex::hex_string(&raw_secret[..]),
+                host,
+                port,
+                server_listening_port,
+            })
+            .await
+            .map_err(|_| ProxyClientDisconnected)
     }
 }
 

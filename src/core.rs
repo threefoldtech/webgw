@@ -1,10 +1,19 @@
+use std::sync::Arc;
+
 use crate::web_proxy::{ConnectedRemote, Proxy, ProxyClientError, ProxyConnectionRequest};
 use jsonrpsee::{
     proc_macros::rpc,
     types::{error::ErrorCode, ErrorObjectOwned, SubscriptionEmptyError},
 };
 use tokio::sync::mpsc;
-use tracing::{debug, error, trace};
+use tracing::{debug, error, info, trace};
+
+/// Maximum size for a request body. This should be large enough to fit the maximum amount of data
+/// required by a single call, and protocol overhead.
+pub const MAX_MESSAGE_BODY_SIZE: u32 = 1024;
+/// Maximum size for a respone body. This should be large enough to fit the maximum amount of data
+/// required by a single response, and protocol overhead.
+pub const MAX_RESPONSE_BODY_SIZE: u32 = 512;
 
 /// Minimum size in bytes of a secret.
 pub const SECRET_MINIMUM_SIZE: usize = 32;
@@ -26,10 +35,30 @@ pub trait Protocol {
 
 #[derive(Debug)]
 pub struct CoreServer {
-    proxy: Proxy,
+    proxy: Arc<Proxy>,
 }
 
-impl CoreServer {}
+impl CoreServer {
+    /// Create a new CoreServer from the individual components.
+    pub fn new(proxy: Proxy) -> Self {
+        let proxy = Arc::new(proxy);
+        let p = Arc::clone(&proxy);
+        tokio::spawn(async move {
+            info!("Spawning proxy backend listener");
+            if let Err(e) = p.listen_backend_connection().await {
+                error!("Failed to listen for proxy backend connections: {}", e);
+            }
+        });
+        let p = Arc::clone(&proxy);
+        tokio::spawn(async move {
+            info!("Spawning proxy HTTP listener");
+            if let Err(e) = p.listen_http().await {
+                error!("Failed to listen for proxy HTTP connections: {}", e);
+            }
+        });
+        Self { proxy }
+    }
+}
 
 impl ProtocolServer for CoreServer {
     fn subscribe_proxy_connections(
