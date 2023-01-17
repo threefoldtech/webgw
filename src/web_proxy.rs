@@ -382,7 +382,7 @@ impl Proxy {
             match timeout(self.backend_connection_timeout, &mut rx).await {
                 // The pending connection map should be cleaned up in the code handling the
                 // incoming connection.
-                Ok(Ok(con)) => Ok((con, Arc::clone(&bandwidth))),
+                Ok(Ok(con)) => Ok((con, Arc::clone(bandwidth))),
                 Ok(Err(_)) => {
                     error!("Oneshot channel closed without sending value, this should not happen!");
                     unreachable!();
