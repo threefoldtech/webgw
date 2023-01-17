@@ -31,7 +31,7 @@ type Hasher = Blake2b<U32>;
 /// Default port to listen on for HTTP connections.
 const HTTP_PORT: u16 = 80;
 /// Default port to listen for client connections.
-const BACKEND_PORT: u16 = 4658;
+const DEFAULT_CLIENT_PORT: u16 = 4658;
 
 /// Amount of bytes used for a ConnectionSecret.
 pub const CONNECTION_SECRET_SIZE: usize = 32;
@@ -54,6 +54,8 @@ pub struct Proxy {
     /// The amount of time a client connection has to send the connection identification secret,
     /// after the initial connection. This should be shorter than `backend_connection_timeout`.
     backend_identification_timeout: Duration,
+    /// The port the server is listening on for client connection.
+    server_client_port: u16,
 }
 
 /// An abstraction over a connection to a peer. This allows proxy specific communication with the
@@ -72,9 +74,20 @@ impl ConnectedRemote {
     /// Request a new connection from the remote
     pub async fn request_connection(
         &self,
-        _secret: ConnectionSecret,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        todo!();
+        raw_secret: ConnectionSecret,
+        host: String,
+        port: u16,
+        server_listening_port: u16,
+    ) -> Result<(), ProxyClientDisconnected> {
+        self.remote
+            .send(ProxyConnectionRequest {
+                secret: faster_hex::hex_string(&raw_secret[..]),
+                host,
+                port,
+                server_listening_port,
+            })
+            .await
+            .map_err(|_| ProxyClientDisconnected)
     }
 }
 
@@ -88,6 +101,7 @@ impl Proxy {
             sniffer_timeout: Duration::from_secs(10),
             backend_connection_timeout: Duration::from_secs(5),
             backend_identification_timeout: Duration::from_secs(3),
+            server_client_port: DEFAULT_CLIENT_PORT,
         }
     }
 
@@ -96,7 +110,7 @@ impl Proxy {
     /// frontend connection coming in, and being identified as being hosted by said client. This
     /// function blocks until the listener fails to accept a connection.
     pub async fn listen_backend_connection(&self) -> Result<(), io::Error> {
-        let listener = TcpListener::bind(("[::]", BACKEND_PORT)).await?;
+        let listener = TcpListener::bind(("[::]", DEFAULT_CLIENT_PORT)).await?;
         loop {
             let (mut client_con, remote) = listener.accept().await?;
             debug!("Accepted new backend connection from {}", remote);
@@ -170,7 +184,7 @@ impl Proxy {
             // Deconstruct the sniffer
             let (buffer, buf_size, mut frontend_con) = sniffer.into_parts();
 
-            match self.request_connection(host).await {
+            match self.request_connection(host, HTTP_PORT).await {
                 Ok((mut backend_con, bandwidth)) => {
                     trace!(
                         "Got new proxy ready connection for {}, dumping {} byte sniffer buffer",
@@ -297,6 +311,7 @@ impl Proxy {
         connected_hosts.remove(host).map(|(_, bandwidth)| bandwidth)
     }
 
+    /// Register a client, blocking until the operation completes.
     pub fn register_client_blocking<'a>(
         &self,
         host: &'a str,
@@ -338,6 +353,7 @@ impl Proxy {
     async fn request_connection<'a>(
         &self,
         host: &'a str,
+        port: u16,
     ) -> Result<(TcpStream, Arc<Bandwidth>), ProxyError<'a>> {
         let connected_hosts = self.connected_hosts.read().await;
         // Check if we know this host. Note that we don't check the registered hosts, but only
@@ -354,7 +370,15 @@ impl Proxy {
                 pending_connections.insert(secret, tx);
             } // drop the MutexGuard on pending connections.
               // TODO: return a proper eror here.
-            remote.request_connection(secret).await.expect("TODO");
+            if remote
+                .request_connection(secret, host.to_string(), port, self.server_client_port)
+                .await
+                .is_err()
+            {
+                // Client disconnected
+                debug!("Couldn't rquest connection from client, client disconnected");
+                return Err(ProxyError::ClientNotConnected { host });
+            };
             match timeout(self.backend_connection_timeout, &mut rx).await {
                 // The pending connection map should be cleaned up in the code handling the
                 // incoming connection.
@@ -424,6 +448,17 @@ impl<'a> Display for ProxyError<'a> {
 }
 
 impl<'a> std::error::Error for ProxyError<'a> {}
+
+#[derive(Debug)]
+pub struct ProxyClientDisconnected;
+
+impl Display for ProxyClientDisconnected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("failed to request proxy connection from client, client disconnected")
+    }
+}
+
+impl std::error::Error for ProxyClientDisconnected {}
 
 #[derive(Debug)]
 pub enum ProxyClientError<'a> {
