@@ -1,5 +1,6 @@
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
 
+use clap::Parser;
 use jsonrpsee::{core::client::IdKind, ws_client::WsClientBuilder};
 use tokio::select;
 use tracing::{error, info, Level};
@@ -12,16 +13,52 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum amount of time to connect to the server.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Temporary testing.
-const SERVER_URL: &str = "ws://localhost:9080";
+/// The default server rpc port. This is the only port we need to know to operate with a server.
+const DEFAULT_SERVER_RPC_PORT: u16 = 9080;
+
+/// Web gateway client
+///
+/// Command line options for the client.
+// TODO: This will be replaced mostly by a config file.
+#[derive(Parser)]
+struct Opts {
+    /// IP used by the server. This is IP must be reachable from this host.
+    #[arg(long)]
+    server_ip: IpAddr,
+    /// Port used by the server for the jsonrpc p2p communication. This is the we will connect on.
+    #[arg(long)]
+    server_rpc_port: Option<u16>,
+    /// Enable debug logging.
+    #[arg(short, long)]
+    debug: bool,
+    /// Enable trace logging. This is very verbose.
+    #[arg(short, long)]
+    trace: bool,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Opts::parse();
+
+    let level = if args.trace {
+        Level::TRACE
+    } else if args.debug {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
+
     tracing_subscriber::fmt()
-        .with_max_level(Level::TRACE)
+        .with_max_level(level)
         .with_ansi(true)
         .with_target(true)
         .init();
+
+    let server_rpc_port = if let Some(port) = args.server_rpc_port {
+        port
+    } else {
+        DEFAULT_SERVER_RPC_PORT
+    };
 
     let client = WsClientBuilder::default()
         .id_format(IdKind::Number)
@@ -29,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .request_timeout(REQUEST_TIMEOUT)
         .connection_timeout(CONNECT_TIMEOUT)
         .max_request_body_size(MAX_MESSAGE_BODY_SIZE)
-        .build(SERVER_URL)
+        .build(&format!("ws://{}:{}", args.server_ip, server_rpc_port))
         .await?;
 
     if !client.is_connected() {
