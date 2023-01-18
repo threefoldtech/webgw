@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::{collections::HashMap, time::Duration};
 
@@ -64,24 +65,24 @@ pub struct ProxyClient {}
 impl ProxyClient {
     /// Handle a request to open a new connection to a [`Proxy`]. If this is succesfull, it also
     /// connects to the local process which is being proxied.
-    // TODO: inject proxy IP somehow.
     pub async fn proxy_connection_request(
         &self,
+        remote: IpAddr,
         request: ProxyConnectionRequest,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut raw_secret = [0; CONNECTION_SECRET_SIZE];
         faster_hex::hex_decode(&request.secret.as_bytes(), &mut raw_secret[..])?;
 
         trace!("Opening new connection to proxy");
-        let mut frontend_con = TcpStream::connect((todo!(), request.server_listening_port)).await?;
+        let mut frontend_con = TcpStream::connect((remote, request.server_listening_port)).await?;
 
         trace!("Writing connection secret");
         frontend_con.write_all(&raw_secret).await?;
         frontend_con.flush().await?;
 
-        // TODO: Introduce sock map
+        // TODO: Introduce port map
         trace!("Connecting to local server on port {}", request.port);
-        let backend_con = TcpStream::connect(("localhost", request.port)).await?;
+        let mut backend_con = TcpStream::connect(("localhost", request.port)).await?;
 
         tokio::spawn(async move {
             // Split the tcp streams as copy bidirectional seems to have some
