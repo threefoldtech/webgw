@@ -17,7 +17,7 @@ use tokio::{
 use tracing::{debug, error, info, trace, warn};
 
 use crate::bandwidth::{Bandwidth, MeasuredConnection};
-use crate::sniffer::{HTTPSniffer, HTTPSnifferError};
+use crate::sniffer::HTTPSniffer;
 
 /// Hash of the secret is a blake2b-32 digest.
 pub type SecretHash = [u8; 32];
