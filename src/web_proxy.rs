@@ -60,9 +60,17 @@ pub struct Proxy {
 }
 
 /// Client implementation for the [`Proxy`].
-pub struct ProxyClient {}
+pub struct ProxyClient {
+    /// Map ports on the proxy to local ports.
+    port_map: HashMap<u16, u16>,
+}
 
 impl ProxyClient {
+    /// Creates a new ProyClient with the given port mappings.
+    pub fn new(port_map: HashMap<u16, u16>) -> Self {
+        Self { port_map }
+    }
+
     /// Handle a request to open a new connection to a [`Proxy`]. If this is succesfull, it also
     /// connects to the local process which is being proxied.
     pub async fn proxy_connection_request(
@@ -80,9 +88,14 @@ impl ProxyClient {
         frontend_con.write_all(&raw_secret).await?;
         frontend_con.flush().await?;
 
-        // TODO: Introduce port map
-        trace!("Connecting to local server on port {}", request.port);
-        let mut backend_con = TcpStream::connect(("localhost", request.port)).await?;
+        // Check if we have a local port override.
+        let target_port = if let Some(port) = self.port_map.get(&request.port) {
+            *port
+        } else {
+            request.port
+        };
+        trace!("Connecting to local server on port {}", target_port);
+        let mut backend_con = TcpStream::connect(("localhost", target_port)).await?;
 
         tokio::spawn(async move {
             // Split the tcp streams as copy bidirectional seems to have some
