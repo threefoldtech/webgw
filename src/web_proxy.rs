@@ -79,7 +79,7 @@ impl ProxyClient {
         request: ProxyConnectionRequest,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut raw_secret = [0; CONNECTION_SECRET_SIZE];
-        faster_hex::hex_decode(&request.secret.as_bytes(), &mut raw_secret[..])?;
+        faster_hex::hex_decode(request.secret.as_bytes(), &mut raw_secret[..])?;
 
         trace!("Opening new connection to proxy");
         let mut frontend_con = TcpStream::connect((remote, request.server_listening_port)).await?;
