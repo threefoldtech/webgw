@@ -58,6 +58,49 @@ pub struct Proxy {
     server_client_port: u16,
 }
 
+/// Client implementation for the [`Proxy`].
+pub struct ProxyClient {}
+
+impl ProxyClient {
+    /// Handle a request to open a new connection to a [`Proxy`]. If this is succesfull, it also
+    /// connects to the local process which is being proxied.
+    // TODO: inject proxy IP somehow.
+    pub async fn proxy_connection_request(
+        &self,
+        request: ProxyConnectionRequest,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut raw_secret = [0; CONNECTION_SECRET_SIZE];
+        faster_hex::hex_decode(&request.secret.as_bytes(), &mut raw_secret[..])?;
+
+        trace!("Opening new connection to proxy");
+        let mut frontend_con = TcpStream::connect((todo!(), request.server_listening_port)).await?;
+
+        trace!("Writing connection secret");
+        frontend_con.write_all(&raw_secret).await?;
+        frontend_con.flush().await?;
+
+        // TODO: Introduce sock map
+        trace!("Connecting to local server on port {}", request.port);
+        let backend_con = TcpStream::connect(("localhost", request.port)).await?;
+
+        tokio::spawn(async move {
+            // Split the tcp streams as copy bidirectional seems to have some
+            // issues. Use `split` and then a select instead of `into_split`
+            // so we only spawn 1 task, and avoid a heap allocation for the split.
+            let (mut backend_reader, mut backend_writer) = backend_con.split();
+            let (mut fronted_reader, mut frontend_writer) = frontend_con.split();
+
+            // TODO: Verify graceful shutdown
+            select! {
+                _ = io::copy(&mut fronted_reader, &mut backend_writer) => {}
+                _ = io::copy(&mut backend_reader, &mut frontend_writer) => {}
+            }
+        });
+
+        Ok(())
+    }
+}
+
 impl Proxy {
     /// Create a new Proxy
     pub fn new() -> Self {
