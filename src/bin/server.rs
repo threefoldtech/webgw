@@ -7,7 +7,7 @@ use webgw::{
 };
 
 /// Amount of seconds between server pings.
-const PING_INTERVAL_SECONDS: u64 = 60;
+const PING_INTERVAL: Duration = Duration::from_secs(60);
 /// Maximum amount of connections the server accepts.
 const SERVER_MAX_CONNECTIONS: u32 = 10_000;
 
@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let handle = jsonrpsee::server::ServerBuilder::new()
         .ws_only()
-        .ping_interval(Duration::from_secs(PING_INTERVAL_SECONDS))
+        .ping_interval(PING_INTERVAL)
         .max_connections(SERVER_MAX_CONNECTIONS)
         .set_id_provider(jsonrpsee::server::RandomIntegerIdProvider)
         .max_request_body_size(MAX_MESSAGE_BODY_SIZE)
