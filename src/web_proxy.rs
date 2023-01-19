@@ -60,6 +60,7 @@ pub struct Proxy {
 }
 
 /// Client implementation for the [`Proxy`].
+#[derive(Debug)]
 pub struct ProxyClient {
     /// Map ports on the proxy to local ports.
     port_map: HashMap<u16, u16>,
@@ -77,7 +78,7 @@ impl ProxyClient {
         &self,
         remote: IpAddr,
         request: ProxyConnectionRequest,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut raw_secret = [0; CONNECTION_SECRET_SIZE];
         faster_hex::hex_decode(request.secret.as_bytes(), &mut raw_secret[..])?;
 

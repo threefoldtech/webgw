@@ -1,12 +1,17 @@
-use std::sync::Arc;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use crate::web_proxy::{ConnectedRemote, Proxy, ProxyClientError, ProxyConnectionRequest};
+use crate::web_proxy::{
+    ConnectedRemote, Proxy, ProxyClient, ProxyClientError, ProxyConnectionRequest,
+};
 use jsonrpsee::{
+    core::client::IdKind,
     proc_macros::rpc,
     types::{error::ErrorCode, ErrorObjectOwned, SubscriptionEmptyError},
+    ws_client::WsClientBuilder,
 };
-use tokio::sync::mpsc;
-use tracing::{debug, error, info, trace};
+use serde::{Deserialize, Serialize};
+use tokio::{sync::mpsc, time};
+use tracing::{debug, error, info, trace, warn};
 
 /// Maximum size for a request body. This should be large enough to fit the maximum amount of data
 /// required by a single call, and protocol overhead.
@@ -19,6 +24,13 @@ pub const MAX_RESPONSE_BODY_SIZE: u32 = 512;
 pub const SECRET_MINIMUM_SIZE: usize = 32;
 /// Maximum size in bytes of a secret;
 pub const SECRET_MAXIMUM_SIZE: usize = 256;
+
+/// Amount of seconds between client pings.
+const PING_INTERVAL: Duration = Duration::from_secs(60);
+/// Maximum amount of time to wait for a request to be processed by the server.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum amount of time to connect to the server.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The maximum amount of proxy requests to buffer per client.
 const PROXY_CONNECT_BUFFER_SIZE: usize = 1;
@@ -36,6 +48,158 @@ pub trait Protocol {
 #[derive(Debug)]
 pub struct CoreServer {
     proxy: Arc<Proxy>,
+}
+
+#[derive(Debug)]
+pub struct CoreClient {
+    proxy_client: ProxyClient,
+    proxies: Vec<ProxyConnectionConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CoreClientConfig {
+    proxy: ProxyClientConfig,
+}
+
+/// Configuration for the [`ProxyClient`].
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProxyClientConfig {
+    port_map: Option<HashMap<u16, u16>>,
+    proxies: Option<Vec<ProxyConnectionConfig>>,
+}
+
+/// Configuration for a single host on a proxy.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProxyConnectionConfig {
+    /// Hostname to proxy.
+    host: String,
+    /// Secret, hex encoded, for the host on the given proxy.
+    hex_secret: String,
+    address: SocketAddr,
+}
+
+impl CoreClient {
+    /// Create a new CoreClient from the given [`CoreClientConfig`].
+    pub fn new(config: CoreClientConfig) -> Self {
+        Self {
+            proxy_client: ProxyClient::new(config.proxy.port_map.unwrap_or_default()),
+            proxies: config.proxy.proxies.unwrap_or_default(),
+        }
+    }
+
+    /// Connect the client to the defined servers in the config. If not servers are defined, this
+    /// function will exit immediately.
+    ///
+    /// This function launches all clients and disjoins them, meaning it will exit as soon as all
+    /// clients have spawned. Individual clients will periodically reconnect if the connection
+    /// breaks.
+    pub async fn connect(self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.proxies.is_empty() {
+            warn!("No proxies defined in the client, exiting");
+            return Ok(());
+        }
+        debug!("Starting client connections");
+
+        // Gather entries per proxy
+        let mut hosts_per_proxy = HashMap::new();
+        for entry in self.proxies {
+            hosts_per_proxy
+                .entry(entry.address)
+                .or_insert_with(Vec::new)
+                .push((entry.host, entry.hex_secret))
+        }
+
+        let proxy_client = Arc::new(self.proxy_client);
+
+        for (remote, host_configs) in hosts_per_proxy {
+            let proxy_client = Arc::clone(&proxy_client);
+            tokio::spawn(async move {
+                loop {
+                    let client = match WsClientBuilder::default()
+                        .id_format(IdKind::Number)
+                        .ping_interval(PING_INTERVAL)
+                        .request_timeout(REQUEST_TIMEOUT)
+                        .connection_timeout(CONNECT_TIMEOUT)
+                        .max_request_body_size(MAX_MESSAGE_BODY_SIZE)
+                        .build(&format!("ws://{}", remote))
+                        .await
+                    {
+                        Ok(client) => {
+                            trace!("Client connected to {}", remote);
+                            Arc::new(client)
+                        }
+                        Err(e) => {
+                            error!("Could not connect to client: {}", e);
+                            trace!("Attempting next connection in 60 seconds");
+                            time::sleep(Duration::from_secs(60)).await;
+                            continue;
+                        }
+                    };
+
+                    if !client.is_connected() {
+                        error!("Client is not connected");
+                        continue;
+                    }
+
+                    trace!("Client connected to proxy");
+
+                    // Start subscribtions
+                    for (host, hex_secret) in host_configs.clone() {
+                        let client = Arc::clone(&client);
+                        let proxy_client = Arc::clone(&proxy_client);
+                        tokio::spawn(async move {
+                            'outer: loop {
+                                let mut sub = match client
+                                    .subscribe_proxy_connections(&host, &hex_secret)
+                                    .await
+                                {
+                                    Ok(sub) => {
+                                        trace!(
+                                            "Opened subscription for host {} to {}",
+                                            host,
+                                            remote
+                                        );
+                                        sub
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "Could not subscribe for host {} on {}: {}",
+                                            host, remote, e
+                                        );
+                                        time::sleep(Duration::from_secs(60)).await;
+                                        continue;
+                                    }
+                                };
+
+                                while let Some(request) = sub.next().await {
+                                    match request {
+                                        Ok(request) => {
+                                            if let Err(e) = proxy_client
+                                                .proxy_connection_request(remote.ip(), request)
+                                                .await
+                                            {
+                                                error!("Could not proxy request: {}", e);
+                                                time::sleep(Duration::from_secs(10)).await;
+                                                continue 'outer;
+                                            }
+                                            trace!("Proxy connection established");
+                                        }
+                                        Err(e) => {
+                                            error!("Subscription error {}", e);
+                                            time::sleep(Duration::from_secs(10)).await;
+                                            continue 'outer;
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+        }
+
+        Ok(())
+    }
 }
 
 impl CoreServer {
@@ -141,6 +305,8 @@ impl ProtocolServer for CoreServer {
         }
     }
 }
+
+impl CoreClient {}
 
 impl<'a> From<ProxyClientError<'a>> for ErrorObjectOwned {
     fn from(value: ProxyClientError<'a>) -> Self {
