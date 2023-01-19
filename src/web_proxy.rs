@@ -66,56 +66,6 @@ pub struct ProxyClient {
     port_map: HashMap<u16, u16>,
 }
 
-impl ProxyClient {
-    /// Creates a new ProyClient with the given port mappings.
-    pub fn new(port_map: HashMap<u16, u16>) -> Self {
-        Self { port_map }
-    }
-
-    /// Handle a request to open a new connection to a [`Proxy`]. If this is succesfull, it also
-    /// connects to the local process which is being proxied.
-    pub async fn proxy_connection_request(
-        &self,
-        remote: IpAddr,
-        request: ProxyConnectionRequest,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut raw_secret = [0; CONNECTION_SECRET_SIZE];
-        faster_hex::hex_decode(request.secret.as_bytes(), &mut raw_secret[..])?;
-
-        trace!("Opening new connection to proxy");
-        let mut frontend_con = TcpStream::connect((remote, request.server_listening_port)).await?;
-
-        trace!("Writing connection secret");
-        frontend_con.write_all(&raw_secret).await?;
-        frontend_con.flush().await?;
-
-        // Check if we have a local port override.
-        let target_port = if let Some(port) = self.port_map.get(&request.port) {
-            *port
-        } else {
-            request.port
-        };
-        trace!("Connecting to local server on port {}", target_port);
-        let mut backend_con = TcpStream::connect(("localhost", target_port)).await?;
-
-        tokio::spawn(async move {
-            // Split the tcp streams as copy bidirectional seems to have some
-            // issues. Use `split` and then a select instead of `into_split`
-            // so we only spawn 1 task, and avoid a heap allocation for the split.
-            let (mut backend_reader, mut backend_writer) = backend_con.split();
-            let (mut fronted_reader, mut frontend_writer) = frontend_con.split();
-
-            // TODO: Verify graceful shutdown
-            select! {
-                _ = io::copy(&mut fronted_reader, &mut backend_writer) => {}
-                _ = io::copy(&mut backend_reader, &mut frontend_writer) => {}
-            }
-        });
-
-        Ok(())
-    }
-}
-
 impl Proxy {
     /// Create a new Proxy
     pub fn new() -> Self {
@@ -301,6 +251,15 @@ impl Proxy {
         registered_hosts.remove(host)
     }
 
+    /// List all currently known hosts on the server allong with their secrets.
+    pub async fn list_hosts(&self) -> Vec<(String, SecretHash)> {
+        let registered_hosts = self.registered_hosts.read().await;
+        registered_hosts
+            .iter()
+            .map(|(host, &secret)| (host.clone(), secret))
+            .collect()
+    }
+
     /// Register a new client for a given host. The secret is hashed, and if the resulting value
     /// matches the configured secret hash, the client is accepted.
     pub async fn register_client<'a>(
@@ -447,6 +406,56 @@ impl Proxy {
 impl Default for Proxy {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl ProxyClient {
+    /// Creates a new ProyClient with the given port mappings.
+    pub fn new(port_map: HashMap<u16, u16>) -> Self {
+        Self { port_map }
+    }
+
+    /// Handle a request to open a new connection to a [`Proxy`]. If this is succesfull, it also
+    /// connects to the local process which is being proxied.
+    pub async fn proxy_connection_request(
+        &self,
+        remote: IpAddr,
+        request: ProxyConnectionRequest,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut raw_secret = [0; CONNECTION_SECRET_SIZE];
+        faster_hex::hex_decode(request.secret.as_bytes(), &mut raw_secret[..])?;
+
+        trace!("Opening new connection to proxy");
+        let mut frontend_con = TcpStream::connect((remote, request.server_listening_port)).await?;
+
+        trace!("Writing connection secret");
+        frontend_con.write_all(&raw_secret).await?;
+        frontend_con.flush().await?;
+
+        // Check if we have a local port override.
+        let target_port = if let Some(port) = self.port_map.get(&request.port) {
+            *port
+        } else {
+            request.port
+        };
+        trace!("Connecting to local server on port {}", target_port);
+        let mut backend_con = TcpStream::connect(("localhost", target_port)).await?;
+
+        tokio::spawn(async move {
+            // Split the tcp streams as copy bidirectional seems to have some
+            // issues. Use `split` and then a select instead of `into_split`
+            // so we only spawn 1 task, and avoid a heap allocation for the split.
+            let (mut backend_reader, mut backend_writer) = backend_con.split();
+            let (mut fronted_reader, mut frontend_writer) = frontend_con.split();
+
+            // TODO: Verify graceful shutdown
+            select! {
+                _ = io::copy(&mut fronted_reader, &mut backend_writer) => {}
+                _ = io::copy(&mut backend_reader, &mut frontend_writer) => {}
+            }
+        });
+
+        Ok(())
     }
 }
 

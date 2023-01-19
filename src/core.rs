@@ -222,6 +222,11 @@ impl CoreServer {
         });
         Self { proxy }
     }
+
+    /// Get a handle to the [`Proxy`].
+    pub fn proxy(&self) -> Arc<Proxy> {
+        Arc::clone(&self.proxy)
+    }
 }
 
 impl ProtocolServer for CoreServer {
