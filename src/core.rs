@@ -194,6 +194,9 @@ impl CoreClient {
                             }
                         });
                     }
+                    // Wait untill the client is disconnected to retry the connection
+                    client.on_disconnect().await;
+                    time::sleep(Duration::from_secs(5)).await;
                 }
             });
         }
