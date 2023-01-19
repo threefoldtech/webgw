@@ -25,15 +25,15 @@ const DEFAULT_SERVER_RPC_PORT: u16 = 9080;
 #[derive(Parser)]
 struct Opts {
     /// IP used for the jsonrpc p2p communication. This is IP must be reachable for clients.
-    #[arg(long)]
-    rpc_ip: Option<IpAddr>,
+    #[arg(long, default_value_t = DEFALT_RPC_IP)]
+    rpc_ip: IpAddr,
     /// Port used for the jsonrpc p2p communication. This is the port clients will connect on.
-    #[arg(long)]
-    rpc_port: Option<u16>,
+    #[arg(long, default_value_t = DEFAULT_SERVER_RPC_PORT)]
+    rpc_port: u16,
     /// Enable debug logging.
     #[arg(short, long)]
     debug: bool,
-    /// Enable trace logging. This is very verbose.
+    /// Enable trace logging. This is very verbose (implies --debug).
     #[arg(short, long)]
     trace: bool,
 }
@@ -56,17 +56,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_target(true)
         .init();
 
-    let rpc_server_ip = if let Some(ip) = args.rpc_ip {
-        ip
-    } else {
-        DEFALT_RPC_IP
-    };
-    let rpc_server_port = if let Some(port) = args.rpc_port {
-        port
-    } else {
-        DEFAULT_SERVER_RPC_PORT
-    };
-
     let proxy = Proxy::new();
     let core = CoreServer::new(proxy);
 
@@ -77,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set_id_provider(jsonrpsee::server::RandomIntegerIdProvider)
         .max_request_body_size(MAX_MESSAGE_BODY_SIZE)
         .max_response_body_size(MAX_RESPONSE_BODY_SIZE)
-        .build((rpc_server_ip, rpc_server_port))
+        .build((args.rpc_ip, args.rpc_port))
         .await?
         .start(core.into_rpc())?;
 
