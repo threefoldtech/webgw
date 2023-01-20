@@ -45,17 +45,20 @@ pub trait Protocol {
     fn subscribe_proxy_connections(&self, host: &str, hex_secret: &str);
 }
 
+/// The core server implementation, containing all components required for the server.
 #[derive(Debug)]
 pub struct CoreServer {
     proxy: Arc<Proxy>,
 }
 
+/// The core client implementation, containing (configuration for) all components for the server.
 #[derive(Debug)]
 pub struct CoreClient {
     proxy_client: ProxyClient,
     proxies: Vec<ProxyConnectionConfig>,
 }
 
+/// Core client configuration, defining how all client components should interact.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CoreClientConfig {
     proxy: ProxyClientConfig,
@@ -64,8 +67,18 @@ pub struct CoreClientConfig {
 /// Configuration for the [`ProxyClient`].
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyClientConfig {
-    port_map: Option<HashMap<u16, u16>>,
+    port_map: Option<Vec<PortMapEntry>>,
     proxies: Option<Vec<ProxyConnectionConfig>>,
+}
+
+/// A port map entry in the config file. This translates ports on the proxy to local ports for
+/// connectivity.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PortMapEntry {
+    /// Port on the proxy on which the connection is received.
+    proxy_port: u16,
+    /// Local port to which we should connect.
+    local_port: u16,
 }
 
 /// Configuration for a single host on a proxy.
@@ -81,8 +94,21 @@ pub struct ProxyConnectionConfig {
 impl CoreClient {
     /// Create a new CoreClient from the given [`CoreClientConfig`].
     pub fn new(config: CoreClientConfig) -> Self {
+        let mut port_map = HashMap::with_capacity(
+            config
+                .proxy
+                .port_map
+                .as_ref()
+                .map(|pm| pm.len())
+                .unwrap_or_default(),
+        );
+        if let Some(pm) = config.proxy.port_map {
+            for pme in pm {
+                port_map.insert(pme.proxy_port, pme.local_port);
+            }
+        }
         Self {
-            proxy_client: ProxyClient::new(config.proxy.port_map.unwrap_or_default()),
+            proxy_client: ProxyClient::new(port_map),
             proxies: config.proxy.proxies.unwrap_or_default(),
         }
     }
@@ -342,3 +368,32 @@ const WRONG_SECRET_ERROR_CODE: i32 = -20_001;
 const UNKNOWN_HOST_MSG: &str = "Unknown host";
 /// Unknown host error message
 const WRONG_SECRET_MSG: &str = "Wrong secret";
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn serialize_config() {
+        let mut port_map_entries = Vec::new();
+        port_map_entries.push(super::PortMapEntry {
+            proxy_port: 80,
+            local_port: 8080,
+        });
+        let cfg = super::CoreClientConfig {
+            proxy: super::ProxyClientConfig {
+                port_map: Some(port_map_entries),
+                proxies: None,
+            },
+        };
+
+        let encoded_cfg = toml::to_string(&cfg).expect("can encode configuration to TOML format");
+
+        assert_eq!(
+            encoded_cfg,
+            r#"[[proxy.port_map]]
+proxy_port = 80
+local_port = 8080
+"#,
+        );
+    }
+}
