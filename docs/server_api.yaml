@@ -1,0 +1,95 @@
+openapi: 3.0.2
+servers:
+  - url: localhost:8080
+    description: Local webgw server 
+
+info:
+  version: 0.1.0 # API version
+  title: Webgw server API
+  license:
+    name: Apache 2.0
+    url: 'http://www.apache.org/licenses/LICENSE-2.0.html'
+
+  contact:
+    name: Threefold Tech
+    url: https://github.com/threefoldtech
+    email: info@threefold.tech
+
+  description: |
+    This is the command API definition of the webgw server. This API is used to manage the registered host names and their associated secrets on the server.
+
+tags:
+  - name: proxy
+    description: Operations related to the web proxy.
+
+paths:
+  '/api/v1/proxy':
+    get:
+      tags:
+        - proxy
+      summary: List registered hosts
+      description: List all currently registered hosts and their secrets.
+      operationId: listHosts
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  schema:
+                    $ref: '#/components/schemas/HostInfo'
+    post:
+      tags:
+        - proxy
+      summary: Register new host
+      description: Register a new host with a given secret hash.
+      operationId: registerHost
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HostInfo'
+      responses:
+        '200':
+          description: Host registered
+        '400':
+          description: Invalid hex secret hash supplied
+        '409':
+          description: Host already registered
+  '/api/v1/proxy/{host}':
+    delete:
+      tags:
+        - proxy
+      summary: Delete registerd host
+      description: Makes sure the host is not registered.
+      operationId: unregisterHost
+      parameters:
+        - name: host
+          in: path
+          description: The host do delete from the server
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Registered host deleted
+        '204':
+          description: This host was not registered
+
+components:
+  schemas:
+    HostInfo:
+      type: object
+      properties:
+        host:
+          description: Host name which is registered or to be registered
+          type: string
+          example: www.example.com
+        hexSecretHash:
+          description: The secret used to authenticate clients, in hex form
+          type: string
+          minLenght: 64
+          maxLenght: 64
+          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
