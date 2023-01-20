@@ -41,10 +41,10 @@ pub const CONNECTION_SECRET_SIZE: usize = 32;
 #[derive(Debug)]
 pub struct Proxy {
     /// Host names for which a client is connected
-    connected_hosts: RwLock<HashMap<String, (ConnectedRemote, Arc<Bandwidth>)>>,
+    connected_hosts: RwLock<HashMap<String, ConnectedRemote>>,
     /// All hosts registered in the proxy, mapped to the secret required by clients for
     /// authentication.
-    registered_hosts: RwLock<HashMap<String, SecretHash>>,
+    registered_hosts: RwLock<HashMap<String, (SecretHash, Arc<Bandwidth>)>>,
     /// Pending backend connections.
     pending_proxy_connections: Arc<Mutex<HashMap<ConnectionSecret, oneshot::Sender<TcpStream>>>>,
     /// The maximum amount of time to sniff the destination from a new frontend connection.
@@ -167,8 +167,19 @@ impl Proxy {
             // Deconstruct the sniffer
             let (buffer, buf_size, mut frontend_con) = sniffer.into_parts();
 
+            // Scope this, so we drop the read lock on registered hosts early.
+            let bandwidth = {
+                let registered_hosts = self.registered_hosts.read().await;
+                if let Some((_, bandwidth)) = registered_hosts.get(host) {
+                    Arc::clone(bandwidth)
+                } else {
+                    debug!("Can't get bandwith meters for unknown host {}", host);
+                    continue;
+                }
+            };
+
             match self.request_connection(host, HTTP_PORT).await {
-                Ok((mut backend_con, bandwidth)) => {
+                Ok(mut backend_con) => {
                     trace!(
                         "Got new proxy ready connection for {}, dumping {} byte sniffer buffer",
                         host,
@@ -225,7 +236,7 @@ impl Proxy {
         secret_hash: SecretHash,
     ) -> Result<(), DuplicateHostRegistration> {
         let mut registered_hosts = self.registered_hosts.write().await;
-        if let Some(known_secret) = registered_hosts.get(&host) {
+        if let Some((known_secret, _)) = registered_hosts.get(&host) {
             if known_secret != &secret_hash {
                 return Err(DuplicateHostRegistration {
                     host,
@@ -237,26 +248,27 @@ impl Proxy {
         // It is technically possible that the host is already registered, but then the secret is
         // the same (we checked for a __different__ secret above), so we will silently ignore that
         // and allow this as a NOOP.
-        registered_hosts.insert(host, secret_hash);
+        registered_hosts.insert(host, (secret_hash, Arc::new(Bandwidth::new())));
         Ok(())
     }
 
     /// Unregister a host from the Proxy. If the host is known, the secret hash associated is
     /// returned. This can be used for debugging from the call site. This also removes a
-    /// connected client, if any.
-    pub async fn unregister_host(&self, host: &str) -> Option<SecretHash> {
+    /// connected client, if any. This also returns a copy of the bandwidth measurements, allowing
+    /// the caller to get a final count of the stats.
+    pub async fn unregister_host(&self, host: &str) -> Option<(SecretHash, Arc<Bandwidth>)> {
         let mut registered_hosts = self.registered_hosts.write().await;
         let mut connected_hosts = self.connected_hosts.write().await;
         connected_hosts.remove(host);
         registered_hosts.remove(host)
     }
 
-    /// List all currently known hosts on the server allong with their secrets.
-    pub async fn list_hosts(&self) -> Vec<(String, SecretHash)> {
+    /// List all currently known hosts on the server allong with their secrets and bandwidth stats.
+    pub async fn list_hosts(&self) -> Vec<(String, SecretHash, Arc<Bandwidth>)> {
         let registered_hosts = self.registered_hosts.read().await;
         registered_hosts
             .iter()
-            .map(|(host, &secret)| (host.clone(), secret))
+            .map(|(host, (secret, bandwidth))| (host.clone(), *secret, Arc::clone(bandwidth)))
             .collect()
     }
 
@@ -270,8 +282,8 @@ impl Proxy {
     ) -> Result<(), ProxyClientError<'a>> {
         let secret_hash = Hasher::digest(secret);
         let registered_hosts = self.registered_hosts.read().await;
-        let registered_secret_hash = match registered_hosts.get(host) {
-            Some(secret) => secret,
+        let (registered_secret_hash, _) = match registered_hosts.get(host) {
+            Some(value) => value,
             None => return Err(ProxyClientError::UnknownHost { host }),
         };
         if secret_hash.as_slice() != registered_secret_hash {
@@ -283,24 +295,15 @@ impl Proxy {
         // hosts. We only grab this lock after the above checks to avoid contention here as much as
         // possible, as this map is also used whenever a new frontend connection is identified.
         let mut connected_remotes = self.connected_hosts.write().await;
-        // Extract existing measurements, in case we already have a live client for this host. The
-        // client will be replaced regardless. We use remove for this, as we will end up replacing
-        // the data anyway, and by removing we take ownership of the data, avoiding making a copy
-        // of the Arc and bumping its refcount. This is ever so slightly more performant.
-        let bandwidth = if let Some((_, bandwidth)) = connected_remotes.remove(host) {
-            bandwidth
-        } else {
-            Arc::new(Bandwidth::new())
-        };
-        connected_remotes.insert(host.to_string(), (remote, bandwidth));
+        connected_remotes.insert(host.to_string(), remote);
 
         Ok(())
     }
 
-    /// Unregisters a client for a host. This returns the current bandwidth counters for the host.
-    pub async fn unregister_client<'a>(&self, host: &str) -> Option<Arc<Bandwidth>> {
+    /// Unregisters a client for a host. This returns wether a client was present or not.
+    pub async fn unregister_client<'a>(&self, host: &str) -> bool {
         let mut connected_hosts = self.connected_hosts.write().await;
-        connected_hosts.remove(host).map(|(_, bandwidth)| bandwidth)
+        connected_hosts.remove(host).is_some()
     }
 
     /// Register a client, blocking until the operation completes.
@@ -312,8 +315,8 @@ impl Proxy {
     ) -> Result<(), ProxyClientError<'a>> {
         let secret_hash = Hasher::digest(secret);
         let registered_hosts = self.registered_hosts.blocking_read();
-        let registered_secret_hash = match registered_hosts.get(host) {
-            Some(secret) => secret,
+        let (registered_secret_hash, _) = match registered_hosts.get(host) {
+            Some(value) => value,
             None => return Err(ProxyClientError::UnknownHost { host }),
         };
         if secret_hash.as_slice() != registered_secret_hash {
@@ -325,16 +328,7 @@ impl Proxy {
         // hosts. We only grab this lock after the above checks to avoid contention here as much as
         // possible, as this map is also used whenever a new frontend connection is identified.
         let mut connected_remotes = self.connected_hosts.blocking_write();
-        // Extract existing measurements, in case we already have a live client for this host. The
-        // client will be replaced regardless. We use remove for this, as we will end up replacing
-        // the data anyway, and by removing we take ownership of the data, avoiding making a copy
-        // of the Arc and bumping its refcount. This is ever so slightly more performant.
-        let bandwidth = if let Some((_, bandwidth)) = connected_remotes.remove(host) {
-            bandwidth
-        } else {
-            Arc::new(Bandwidth::new())
-        };
-        connected_remotes.insert(host.to_string(), (remote, bandwidth));
+        connected_remotes.insert(host.to_string(), remote);
 
         Ok(())
     }
@@ -346,12 +340,12 @@ impl Proxy {
         &self,
         host: &'a str,
         port: u16,
-    ) -> Result<(TcpStream, Arc<Bandwidth>), ProxyError<'a>> {
+    ) -> Result<TcpStream, ProxyError<'a>> {
         let connected_hosts = self.connected_hosts.read().await;
         // Check if we know this host. Note that we don't check the registered hosts, but only
         // the ones for which a client is connected, as a known host without connected client
         // will have the same result as an unknown host, i.e. a closed connection.
-        if let Some((remote, bandwidth)) = connected_hosts.get(host) {
+        if let Some(remote) = connected_hosts.get(host) {
             // Generate secret
             let secret: [u8; 32] = rand::thread_rng().gen();
             // Insert secret in map with pending connections, with value oneshot channel to return
@@ -374,7 +368,7 @@ impl Proxy {
             match timeout(self.backend_connection_timeout, &mut rx).await {
                 // The pending connection map should be cleaned up in the code handling the
                 // incoming connection.
-                Ok(Ok(con)) => Ok((con, Arc::clone(bandwidth))),
+                Ok(Ok(con)) => Ok(con),
                 Ok(Err(_)) => {
                     error!("Oneshot channel closed without sending value, this should not happen!");
                     unreachable!();
@@ -391,7 +385,7 @@ impl Proxy {
                     // a connection is on the channel, and if so we still accept it.
                     if pending_connections.remove(&secret).is_none() {
                         if let Ok(con) = rx.try_recv() {
-                            return Ok((con, Arc::clone(bandwidth)));
+                            return Ok(con);
                         }
                     }
                     Err(ProxyError::ClientTimeout)
@@ -658,7 +652,7 @@ mod tests {
         let host = String::from("example.com");
         let proxy = Proxy::new();
         let _ = proxy.register_host(host.clone(), HASH).await;
-        let possible_secret = proxy.unregister_host(&host).await;
+        let possible_secret = proxy.unregister_host(&host).await.map(|(s, _)| s);
         assert_eq!(possible_secret, Some(HASH))
     }
 
@@ -670,7 +664,7 @@ mod tests {
         ];
         let host = String::from("example.com");
         let proxy = Proxy::new();
-        let possible_secret = proxy.unregister_host(&host).await;
+        let possible_secret = proxy.unregister_host(&host).await.map(|(s, _)| s);
         assert_eq!(possible_secret, None)
     }
 }

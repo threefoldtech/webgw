@@ -50,7 +50,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/HostInfo'
+              $ref: '#/components/schemas/AddHost'
       responses:
         '200':
           description: Host registered
@@ -80,6 +80,19 @@ paths:
 
 components:
   schemas:
+    AddHost:
+      type: object
+      properties:
+        host:
+          description: Host name which is registered or to be registered
+          type: string
+          example: www.example.com
+        hexSecretHash:
+          description: The secret used to authenticate clients, in hex form
+          type: string
+          minLenght: 64
+          maxLenght: 64
+          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
     HostInfo:
       type: object
       properties:
@@ -93,3 +106,12 @@ components:
           minLenght: 64
           maxLenght: 64
           example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        read:
+          description: Amount of bytes read by the proxy from backends for this host
+          type: integer
+          example: 5216988241
+        written:
+          description: Amount of bytes written by the proxy to backends for this host
+          type: integer
+          example: 5216988241
+

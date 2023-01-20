@@ -122,16 +122,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AddHost {
+    host: String,
+    hex_secret_hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct HostInfo {
     host: String,
     hex_secret_hash: String,
+    read: u64,
+    written: u64,
 }
 
 /// Add a new host to the server with the configured secret, after which the server can accept
 /// subscriptions for this host.
 async fn add_host(
     State(state): State<Arc<Proxy>>,
-    extract::Json(data): extract::Json<HostInfo>,
+    extract::Json(data): extract::Json<AddHost>,
 ) -> impl IntoResponse {
     let mut secret = [0; 32];
     if let Err(e) = faster_hex::hex_decode(data.hex_secret_hash.as_bytes(), &mut secret) {
@@ -160,11 +169,14 @@ async fn remove_host(
     State(state): State<Arc<Proxy>>,
     Path(host): Path<String>,
 ) -> impl IntoResponse {
-    if let Some(secret_hash) = state.unregister_host(&host).await {
+    if let Some((secret_hash, bandwidth)) = state.unregister_host(&host).await {
         info!(
-            "Removed host {} from proxy with registered secret hash {}",
+            "Removed host {} from proxy with registered secret hash {}, read {} bytes, wrote {} bytes",
             host,
-            faster_hex::hex_string(&secret_hash)
+            faster_hex::hex_string(&secret_hash),
+            bandwidth.read(),
+            bandwidth.written(),
+
         );
         StatusCode::OK
     } else {
@@ -178,9 +190,11 @@ async fn list_hosts(State(state): State<Arc<Proxy>>) -> (StatusCode, Json<Vec<Ho
         .list_hosts()
         .await
         .into_iter()
-        .map(|(host, secret_hash)| HostInfo {
+        .map(|(host, secret_hash, bandwidth)| HostInfo {
             host,
             hex_secret_hash: faster_hex::hex_string(&secret_hash),
+            read: bandwidth.read(),
+            written: bandwidth.written(),
         })
         .collect();
     (StatusCode::OK, Json(data))
