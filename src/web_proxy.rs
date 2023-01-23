@@ -10,7 +10,6 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    select,
     sync::RwLock,
     time::timeout,
 };
@@ -179,12 +178,15 @@ impl Proxy {
             };
 
             match self.request_connection(host, HTTP_PORT).await {
-                Ok(mut backend_con) => {
+                Ok(backend_con) => {
                     trace!(
                         "Got new proxy ready connection for {}, dumping {} byte sniffer buffer",
                         host,
                         buf_size
                     );
+                    // Add bandwidth counters to backend connection.
+                    let mut backend_con =
+                        MeasuredConnection::with_bandwidth(backend_con, bandwidth);
                     if let Err(e) = backend_con.write_all(&buffer[..buf_size]).await {
                         // If there is an error, move on to the next connection.
                         debug!("Writing sniffer buffer failed: {}", e);
@@ -196,27 +198,14 @@ impl Proxy {
                     // guarantee that the remote will be able to do anything useful with what
                     // is in the buffer at this point in time anyway.
 
-                    // Don't forget to increment the written counter.
-                    bandwidth.add_written(buf_size as u64);
-
                     tokio::spawn(async move {
-                        // Split the tcp streams as copy bidirectional seems to have some
-                        // issues. Use `split` and then a select instead of `into_split`
-                        // so we only spawn 1 task, and avoid a heap allocation for the split.
-                        let (backend_reader, backend_writer) = backend_con.split();
-                        let (mut fronted_reader, mut frontend_writer) = frontend_con.split();
-                        // Measure bandwidth on the backend.
-                        let mut backend_reader = MeasuredConnection::with_bandwidth(
-                            backend_reader,
-                            Arc::clone(&bandwidth),
-                        );
-                        let mut backend_writer =
-                            MeasuredConnection::with_bandwidth(backend_writer, bandwidth);
-
-                        // TODO: Verify graceful shutdown
-                        select! {
-                            _ = io::copy(&mut fronted_reader, &mut backend_writer) => {}
-                            _ = io::copy(&mut backend_reader, &mut frontend_writer) => {}
+                        if let Err(e) =
+                            io::copy_bidirectional(&mut frontend_con, &mut backend_con).await
+                        {
+                            debug!(
+                                "Error while proxying data between frontend and backend: {}",
+                                e
+                            );
                         }
                     });
                 }
@@ -436,16 +425,8 @@ impl ProxyClient {
         let mut backend_con = TcpStream::connect(("localhost", target_port)).await?;
 
         tokio::spawn(async move {
-            // Split the tcp streams as copy bidirectional seems to have some
-            // issues. Use `split` and then a select instead of `into_split`
-            // so we only spawn 1 task, and avoid a heap allocation for the split.
-            let (mut backend_reader, mut backend_writer) = backend_con.split();
-            let (mut fronted_reader, mut frontend_writer) = frontend_con.split();
-
-            // TODO: Verify graceful shutdown
-            select! {
-                _ = io::copy(&mut fronted_reader, &mut backend_writer) => {}
-                _ = io::copy(&mut backend_reader, &mut frontend_writer) => {}
+            if let Err(e) = io::copy_bidirectional(&mut frontend_con, &mut backend_con).await {
+                debug!("Error while copying data on proxy connection: {}", e)
             }
         });
 

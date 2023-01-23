@@ -180,10 +180,9 @@ impl CoreClient {
                                     .await
                                 {
                                     Ok(sub) => {
-                                        trace!(
+                                        debug!(
                                             "Opened subscription for host {} to {}",
-                                            host,
-                                            remote
+                                            host, remote
                                         );
                                         sub
                                     }
