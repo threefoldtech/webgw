@@ -16,7 +16,7 @@ use tokio::{
 use tracing::{debug, error, info, trace, warn};
 
 use crate::bandwidth::{Bandwidth, MeasuredConnection};
-use crate::sniffer::HTTPSniffer;
+use crate::sniffer::{HTTPSniffer, TLSSniffer};
 
 /// Hash of the secret is a blake2b-32 digest.
 pub type SecretHash = [u8; 32];
@@ -30,6 +30,8 @@ type Hasher = Blake2b<U32>;
 
 /// Default port to listen on for HTTP connections.
 const HTTP_PORT: u16 = 80;
+/// Default port to listen on for TLS connections.
+const TLS_PORT: u16 = 443;
 /// Default port to listen for client connections.
 const DEFAULT_CLIENT_PORT: u16 = 4658;
 
@@ -159,6 +161,87 @@ impl Proxy {
                 }
                 Err(_) => {
                     debug!("Incoming connection did not send host header in time");
+                    continue;
+                }
+            };
+
+            // Deconstruct the sniffer
+            let (buffer, buf_size, mut frontend_con) = sniffer.into_parts();
+
+            // Scope this, so we drop the read lock on registered hosts early.
+            let bandwidth = {
+                let registered_hosts = self.registered_hosts.read().await;
+                if let Some((_, bandwidth)) = registered_hosts.get(host) {
+                    Arc::clone(bandwidth)
+                } else {
+                    debug!("Can't get bandwith meters for unknown host {}", host);
+                    continue;
+                }
+            };
+
+            match self.request_connection(host, HTTP_PORT).await {
+                Ok(backend_con) => {
+                    trace!(
+                        "Got new proxy ready connection for {}, dumping {} byte sniffer buffer",
+                        host,
+                        buf_size
+                    );
+                    // Add bandwidth counters to backend connection.
+                    let mut backend_con =
+                        MeasuredConnection::with_bandwidth(backend_con, bandwidth);
+                    if let Err(e) = backend_con.write_all(&buffer[..buf_size]).await {
+                        // If there is an error, move on to the next connection.
+                        debug!("Writing sniffer buffer failed: {}", e);
+                        continue;
+                    }
+                    // Notice that we don't flush here. That's because we don't really care
+                    // that this data reaches the remote _now_, we only care that it is queued
+                    // before adding the other data of the connection. Besides, there is no
+                    // guarantee that the remote will be able to do anything useful with what
+                    // is in the buffer at this point in time anyway.
+
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            io::copy_bidirectional(&mut frontend_con, &mut backend_con).await
+                        {
+                            debug!(
+                                "Error while proxying data between frontend and backend: {}",
+                                e
+                            );
+                        }
+                    });
+                }
+                Err(e) => {
+                    debug!("Failed to get connection from remote: {}", e);
+                    continue;
+                }
+            };
+        }
+    }
+
+    /// Listen for incoming TLS connections, attempt to identify them, and if successful, attempt
+    /// to proxy them to a connected client, if any. If not client is connected for the host, or
+    /// the host is not known, the connection is closed. This function blocks until the listener
+    /// fails to accept a connection.
+    pub async fn listen_tls(&self) -> Result<(), io::Error> {
+        info!(
+            "Binding TCP listener on port {} for TLS connections",
+            TLS_PORT,
+        );
+        let listener = TcpListener::bind(("::", TLS_PORT)).await?;
+        loop {
+            let (frontend_con, remote) = listener.accept().await?;
+            debug!("Accepted new presumed TLS connection from {}", remote);
+            // Get the target host.
+            let mut sniffer = TLSSniffer::new(frontend_con);
+            let host = match timeout(self.sniffer_timeout, &mut sniffer).await {
+                Ok(Ok(host)) => host,
+                Ok(Err(se)) => {
+                    debug!("Could not extract TLS SNI header from connection: {}", se);
+                    continue;
+                }
+                Err(_) => {
+                    debug!("Incoming connection did not send TLS SNI header in time");
                     continue;
                 }
             };

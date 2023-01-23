@@ -12,9 +12,14 @@ use tls_parser::{nom::Err as TlsParseErr, SNIType, TlsExtension, TlsMessage, Tls
 use tokio::io::{AsyncRead, ReadBuf};
 use tracing::{debug, trace};
 
-/// Technically, a very large cookie could be sent by the client causing all headers to not fit in
-/// this buffer. In practice, we will assume it does.
+/// This should be ample to hold a single client hello.
 const BUFFER_SIZE: usize = 4096;
+
+/// Wire size of a TLS record header.
+const TLS_RECORD_HEADER_SIZE: usize = 5;
+
+/// Byte indicating a TLS handshake message.
+const TLS_RECORD_TYPE_HANDSHAKE: u8 = 0x16;
 
 #[derive(Debug)]
 pub struct Sniffer<'a, T> {
@@ -94,7 +99,23 @@ where
 
             // Attempted TLS parse. Since the first message is always a Client Hello, we don't need
             // to maintain any state.
-            match tls_parser::parse_tls_message_handshake(&buf[..]) {
+            // Also, manually parse the TLS header and make sure it is of a proper type here.
+            // TODO: we don't really care about most of the message, so we could get rid of the tls
+            // parser by manually advancing a pointer until we reach the extension with the sni.
+            // This would also avoid some allocations we don't actually use anyway.
+            if *buf_idx < TLS_RECORD_HEADER_SIZE {
+                continue;
+            }
+            if buf[0] != TLS_RECORD_TYPE_HANDSHAKE {
+                return Poll::Ready(Err(SnifferError::UnexpectedTlsMessage));
+            }
+            // 2 bytes message version (which is different from the TLS version). Purely technically
+            //   we don't care for this, since at this stage all TLS client hello's seem to be
+            //   compatible, and all we care for is finding a possible SNI extension.
+            // 2 byte length, this does not matter as the decoder can figure out if sufficient data
+            //   is present (it is also part of the client hello).
+
+            match tls_parser::parse_tls_message_handshake(&buf[TLS_RECORD_HEADER_SIZE..*buf_idx]) {
                 Ok((_, record)) => {
                     match record {
                         TlsMessage::Handshake(msg) => match msg {
@@ -178,7 +199,9 @@ where
 impl std::fmt::Display for SnifferError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SnifferError::BufferFull => f.pad("buffer is full and there is no 'host' header yet"),
+            SnifferError::BufferFull => {
+                f.pad("buffer is full and there is no client hello with SNI extension yet")
+            }
             SnifferError::ReadError(ref e) => {
                 f.pad(&format!("error reading from the connection: {}", e))
             }

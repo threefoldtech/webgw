@@ -248,6 +248,13 @@ impl CoreServer {
                 error!("Failed to listen for proxy HTTP connections: {}", e);
             }
         });
+        let p = Arc::clone(&proxy);
+        tokio::spawn(async move {
+            info!("Spawning proxy TLS listener");
+            if let Err(e) = p.listen_tls().await {
+                error!("Failed to listen for proxy TLS connections: {}", e);
+            }
+        });
         Self { proxy }
     }
 
