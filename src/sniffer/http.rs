@@ -3,7 +3,6 @@ use std::{
     io,
     marker::PhantomData,
     mem,
-    ops::DerefMut,
     pin::Pin,
     str::Utf8Error,
     task::{ready, Context, Poll},
@@ -68,22 +67,26 @@ where
     type Output = Result<&'a str, SnifferError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> std::task::Poll<Self::Output> {
-        // First get a mutable reference to self. This way we can get a mutable reference to
-        // multiple fields of self at once (the compiler does not allow this while we are in the
-        // Pin).
-        let mut sniffer = self.deref_mut();
         let (start, end) = 'outer: loop {
-            let mut read_buf = ReadBuf::new(&mut sniffer.buf[sniffer.buf_idx..]);
-            if let Err(e) = ready!(Pin::new(&mut sniffer.conn).poll_read(cx, &mut read_buf)) {
+            // Deconstruct self, to avoid borrow check issues.
+            let Sniffer {
+                buf,
+                buf_idx,
+                conn,
+                _marker,
+            } = &mut *self;
+
+            let mut read_buf = ReadBuf::new(&mut buf[*buf_idx..]);
+            if let Err(e) = ready!(Pin::new(conn).poll_read(cx, &mut read_buf)) {
                 return Poll::Ready(Err(SnifferError::ReadError(e)));
             }
             let remainder = read_buf.remaining();
-            sniffer.buf_idx += sniffer.buf.len() - remainder;
+            *buf_idx += buf.len() - remainder;
 
             // Parse HTTP headers
             // TODO: if we do multiple read calls we will parse the same header. This can be fixed
             // by keeping track of the starting position of the last header we did not fully parse.
-            let haystack = &sniffer.buf[..sniffer.buf_idx];
+            let haystack = &buf[..*buf_idx];
             let mut offset = 0;
             for possible_header in haystack.split(|&c| c == b'\n') {
                 if host_header_start(possible_header) {
@@ -97,7 +100,7 @@ where
                 offset += possible_header.len() + 1;
             }
 
-            if sniffer.buf_idx >= sniffer.buf.len() - 1 {
+            if *buf_idx >= buf.len() - 1 {
                 return Poll::Ready(Err(SnifferError::BufferFull));
             }
         };
