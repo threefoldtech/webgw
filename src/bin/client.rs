@@ -8,7 +8,6 @@ use webgw::core::CoreClient;
 /// Web gateway client
 ///
 /// Command line options for the client.
-// TODO: This will be replaced mostly by a config file.
 #[derive(Parser)]
 struct Opts {
     /// Path to the configuration file.
