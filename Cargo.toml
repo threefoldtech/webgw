@@ -11,9 +11,19 @@ name = "server"
 name = "client"
 
 [dependencies]
-# TODO: Reduce scope of features to required ones.
-tokio = { version = "1.24.2", features = ["full"] }
-# TODO: Needed?
+# Technically we only need signal and fs because the others are enabled by other libraries.
+# Also, make sure parking lot is enabled.
+tokio = { version = "1.24.2", features = [
+  "macros",
+  "net",
+  "io-util",
+  "rt-multi-thread",
+  "time",
+  "sync",
+  "parking_lot",
+  "signal",
+  "fs",
+] }
 async-trait = "0.1"
 # Tracing instead of log
 tracing = "0.1"
@@ -24,7 +34,12 @@ tracing-subscriber = { version = "0.3", features = [
   "parking_lot",
 ] }
 rand = "0.8.5"
-jsonrpsee = { version = "0.16.2", features = ["full"] }
+jsonrpsee = { version = "0.16.2", features = [
+  "ws-client",
+  "macros",
+  "server",
+  "client",
+] }
 serde = { version = "1.0.152", features = ["derive"] }
 blake2 = "0.10.6"
 faster-hex = "0.6.1"
