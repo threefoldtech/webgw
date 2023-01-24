@@ -12,12 +12,17 @@ name = "client"
 
 [dependencies]
 # TODO: Reduce scope of features to required ones.
-tokio = { version = "1.24.1", features = ["full"] }
+tokio = { version = "1.24.2", features = ["full"] }
 # TODO: Needed?
 async-trait = "0.1"
 # Tracing instead of log
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "time", "parking_lot"] }
+tracing-subscriber = { version = "0.3", features = [
+  "env-filter",
+  "local-time",
+  "time",
+  "parking_lot",
+] }
 rand = "0.8.5"
 jsonrpsee = { version = "0.16.2", features = ["full"] }
 serde = { version = "1.0.152", features = ["derive"] }
