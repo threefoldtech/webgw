@@ -427,7 +427,6 @@ impl Proxy {
                 let mut pending_connections = self.pending_proxy_connections.lock().await;
                 pending_connections.insert(secret, tx);
             } // drop the MutexGuard on pending connections.
-              // TODO: return a proper eror here.
             if remote
                 .request_connection(secret, host.to_string(), port, self.server_client_port)
                 .await
@@ -552,7 +551,6 @@ impl ConnectedRemote {
 
 /// Request to a client to open a new proxy connection. It contains all the required information
 /// for the client to set up the connection both to the server and the remote service.
-// TODO: Check if we can replace the `String`s here with &'a str.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyConnectionRequest {
     /// Hex encoded connection secret.
