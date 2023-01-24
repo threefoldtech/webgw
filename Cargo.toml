@@ -50,7 +50,11 @@ blake2 = "0.10.6"
 faster-hex = "0.6.1"
 clap = { version = "4.1.1", features = ["derive"] }
 toml = "0.5.10"
-axum = "0.6.2"
+axum = { version = "0.6.2", default-features = false, features = [
+  "json",
+  "tower-log",
+  "tokio",
+] }
 tls-parser = "0.11.0"
 
 [profile.release]
