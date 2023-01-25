@@ -428,7 +428,7 @@ impl Proxy {
                 pending_connections.insert(secret, tx);
             } // drop the MutexGuard on pending connections.
             if remote
-                .request_connection(secret, host.to_string(), port, self.server_client_port)
+                .request_connection(secret, port, self.server_client_port)
                 .await
                 .is_err()
             {
@@ -533,14 +533,12 @@ impl ConnectedRemote {
     pub async fn request_connection(
         &self,
         raw_secret: ConnectionSecret,
-        host: String,
         port: u16,
         server_listening_port: u16,
     ) -> Result<(), ProxyClientDisconnected> {
         self.remote
             .send(ProxyConnectionRequest {
                 secret: faster_hex::hex_string(&raw_secret[..]),
-                host,
                 port,
                 server_listening_port,
             })
@@ -555,9 +553,6 @@ impl ConnectedRemote {
 pub struct ProxyConnectionRequest {
     /// Hex encoded connection secret.
     secret: String,
-    /// Host we are connecting to. This might be needed in case multiple hosts are connected from
-    /// the same client, but could be ignored for now.
-    host: String,
     /// The port the initial connection came in on.
     port: u16,
     /// The port the server is listening on for client connections.
