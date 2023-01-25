@@ -51,11 +51,16 @@ Overview:
 - New connection comes in on the server on either port. The server identifies
 the target host by sniffing the connection.
   - For port 80, HTTP headers are parsed looking for the value of the `host` header.
-  - For port 443, the TLS client hello is extracted to identify the SNI value.
+  - For port 443, the TLS client hello is extracted to identify the `SNI` value.
 - If the host is not known, or no client has subscribed for this host, the connection
 is immediately closed.
 - Otherwise, a notification is sent for the subscription, with a generated ephemeral
-secret and the port number for the original connection.
+secret and the port number for the original connection (on the server).
+We also include the sniffed host value (not currently used but might be
+in the future to implement advanced routing logic in the client), and
+the port on which the server is listening for client connection (so that
+we don't need a static port or to configure this in the client, and the
+server can swap these at random).
 - The client receives the notification, connects to the server, and sends the ephemeral
 secret.
 - The client opens a connection to the local port as specified in the notification
