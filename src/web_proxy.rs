@@ -550,6 +550,7 @@ impl ConnectedRemote {
 /// Request to a client to open a new proxy connection. It contains all the required information
 /// for the client to set up the connection both to the server and the remote service.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProxyConnectionRequest {
     /// Hex encoded connection secret.
     secret: String,
