@@ -49,7 +49,9 @@ With a `client` and `server` binary available, you can run the project
 yourself. You will also need a configuration file for the client in TOML
 format, [an example one is provided](./config.toml). The following
 instruction will work with this example config (and assume you have
-`server` and `client` binaries in the current directory).
+`server` and `client` binaries in the current directory). For an
+in-depth explanation of the config file, you can check [the associated
+documentation](./docs/webgw_client_config.md)
 
 1. Start the server. Since the server binds port 80 and 443, it will
    require root privileges. If you do not want to do this, you can first
