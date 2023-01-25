@@ -58,11 +58,12 @@ instruction will work with this example config (and assume you have
    ```sh
    sudo setcap CAP_NET_BIND_SERVICE=+eip ./server
    ```
+
    Start the server (after adding capabilities, or as root user), with
    debug logging enabled
 
    ```sh
-  ./server -d
+   ./server -d
    ```
 
 1. Register the host (`www.example.com` in this case) on the server via
