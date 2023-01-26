@@ -725,4 +725,15 @@ mod tests {
         let possible_secret = proxy.unregister_host(&host).await.map(|(s, _)| s);
         assert_eq!(possible_secret, None)
     }
+
+    // This test is here to test compliance with an external tool.
+    #[test]
+    fn validate_sha256() {
+        let output = Hasher::digest([b'V']);
+        let hex_output = faster_hex::hex_string(&output);
+        assert_eq!(
+            hex_output,
+            "de5a6f78116eca62d7fc5ce159d23ae6b889b365a1739ad2cf36f925a140d0cc"
+        );
+    }
 }
