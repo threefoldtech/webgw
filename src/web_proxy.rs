@@ -3,9 +3,9 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::{collections::HashMap, time::Duration};
 
-use blake2::{digest::typenum::U32, Blake2b, Digest};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
@@ -18,15 +18,15 @@ use tracing::{debug, error, info, trace, warn};
 use crate::bandwidth::{Bandwidth, MeasuredConnection};
 use crate::sniffer::{HTTPSniffer, TLSSniffer};
 
-/// Hash of the secret is a blake2b-32 digest.
+/// Hash of the secret is a SHA256 digest.
 pub type SecretHash = [u8; 32];
 
 /// Type of a connection secret, which is used to identify connections made from clients to the
 /// proxy to actually proxy a frontend connection.
 pub type ConnectionSecret = [u8; CONNECTION_SECRET_SIZE];
 
-/// Blake2b hasher with 32 byte digest.
-type Hasher = Blake2b<U32>;
+/// SHA256 hasher (32 byte digest).
+type Hasher = Sha256;
 
 /// Default port to listen on for HTTP connections.
 const HTTP_PORT: u16 = 80;

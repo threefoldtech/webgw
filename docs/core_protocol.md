@@ -26,7 +26,7 @@ This is a `subsription` which registers the `client` with the `server` for
 the given host and with the provided `secret`. The `secret` is an arbitrary
 byte sequence at **least 32 bytes and at most 256 bytes long**. The `secret`
 is transmitted as a hex encoded string. On the `server`, the `secret` will
-be hashed with `blake2b-256` (256bit digest). This hashed value must
+be hashed with `SHA256` (256bit digest). This hashed value must
 match the value on the server, or the subscription will be rejected.
 Arguments are passed as a map.
 
