@@ -158,20 +158,20 @@ mod tests {
 
     #[tokio::test]
     async fn sniff_valid_header() {
-        let http_packet = br#"GET / HTTP/1.1
+        const HTTP_PACKET: &[u8; 85] = br#"GET / HTTP/1.1
 User-Agent: curl/7.64.1
 Host: www.example.com
 Accept-Language: en, mi
 "#;
-        let cursor = io::Cursor::new(http_packet.clone());
+        let cursor = io::Cursor::new(HTTP_PACKET.clone());
         let mut sniffer = Sniffer::new(cursor);
         let host = (&mut sniffer).await.expect("can't parse host header");
         assert_eq!(host, "www.example.com");
         let (buf, idx, cursor) = sniffer.into_parts();
-        assert!(idx <= http_packet.len());
+        assert!(idx <= HTTP_PACKET.len());
         let mut fb = buf[..idx].to_vec();
         let cursor_pos = cursor.position();
         fb.extend(&cursor.into_inner()[cursor_pos as usize..]);
-        assert_eq!(fb, http_packet[..]);
+        assert_eq!(fb, HTTP_PACKET[..]);
     }
 }
