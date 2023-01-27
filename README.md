@@ -71,12 +71,13 @@ documentation](./docs/webgw_client_config.md)
 1. Register the host (`www.example.com` in this case) on the server via
    the HTTP API. In our example config, you can see that the secret is
    actually 32 '0' characters (if you decode the hex value). When
-   hashed, this turns into the hex string `"808fcd161c410acb95dcdf84c7281e9eb4d48163b8e2554d2174e30fcf01da08"`.
+   hashed with SHA256, this turns into the hex string
+   `"84e0c0eafaa95a34c293f278ac52e45ce537bab5e752a00e6959a13ae103b65a"`.
    If curl is available, you can add the host with the following command
    line call
 
    ```sh
-   curl -H 'content-type: application/json' -XPOST -d '{"host":"www.example.com", "hexSecretHash":"808fcd161c410acb95dcdf84c7281e9eb4d48163b8e2554d2174e30fcf01da08"}' localhost:8080/api/v1/proxy
+   curl -H 'content-type: application/json' -XPOST -d '{"host":"www.example.com", "hexSecretHash":"84e0c0eafaa95a34c293f278ac52e45ce537bab5e752a00e6959a13ae103b65a"}' localhost:8080/api/v1/proxy
    ```
 
 1. Start a server which will act as the backend service. You can use
@@ -164,7 +165,6 @@ should you have no other option than to write an `unsafe` code section.
 MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test
 ```
 
-
 ## License
 
-This project is licensed under [the Apache 2.0 license](./LICENSE). 
+This project is licensed under [the Apache 2.0 license](./LICENSE).
