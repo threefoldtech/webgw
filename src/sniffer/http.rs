@@ -107,9 +107,8 @@ where
         match std::str::from_utf8(&self.buf[start..end]) {
             // SAFETY: [`mem::transmute`] is used to change the lifetime of the returned &str from
             // '1 (the anonymous lifetime introduced by Pin<&'1 Self>) to the lifetime of the
-            // pinned data 'a. It is a bit unfortunate we have to do this here, and we should
-            // probably look for a better way. Regardless, we _know_ the underlying buffer is valid
-            // for at least 'a, therefore this reference is as well.
+            // pinned data 'a. It is a bit unfortunate we have to do this here. Regardless, we
+            // _know_ the underlying buffer is valid for at least 'a, therefore this reference is as well.
             Ok(header) => Poll::Ready(Ok(unsafe { mem::transmute(header.trim()) })),
             Err(e) => Poll::Ready(Err(SnifferError::HeaderParseError(e))),
         }
