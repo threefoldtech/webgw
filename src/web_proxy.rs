@@ -6,13 +6,14 @@ use std::{collections::HashMap, time::Duration};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::select;
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::RwLock,
+    sync::{mpsc, oneshot, Mutex, RwLock},
     time::timeout,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::bandwidth::{Bandwidth, MeasuredConnection};
@@ -43,9 +44,8 @@ pub const CONNECTION_SECRET_SIZE: usize = 32;
 pub struct Proxy {
     /// Host names for which a client is connected
     connected_hosts: RwLock<HashMap<String, ConnectedRemote>>,
-    /// All hosts registered in the proxy, mapped to the secret required by clients for
-    /// authentication.
-    registered_hosts: RwLock<HashMap<String, (SecretHash, Arc<Bandwidth>)>>,
+    /// All hosts registered in the proxy, with associated info
+    registered_hosts: RwLock<HashMap<String, HostInfo>>,
     /// Pending backend connections.
     pending_proxy_connections: Arc<Mutex<HashMap<ConnectionSecret, oneshot::Sender<TcpStream>>>>,
     /// The maximum amount of time to sniff the destination from a new frontend connection.
@@ -58,6 +58,14 @@ pub struct Proxy {
     backend_identification_timeout: Duration,
     /// The port the server is listening on for client connection.
     server_client_port: u16,
+}
+
+/// Required info for a connected host
+#[derive(Debug)]
+struct HostInfo {
+    secret_hash: SecretHash,
+    bandwidth: Arc<Bandwidth>,
+    cancellation_token: CancellationToken,
 }
 
 /// Client implementation for the [`Proxy`].
@@ -169,10 +177,10 @@ impl Proxy {
             let (buffer, buf_size, mut frontend_con) = sniffer.into_parts();
 
             // Scope this, so we drop the read lock on registered hosts early.
-            let bandwidth = {
+            let (bandwidth, token) = {
                 let registered_hosts = self.registered_hosts.read().await;
-                if let Some((_, bandwidth)) = registered_hosts.get(host) {
-                    Arc::clone(bandwidth)
+                if let Some(info) = registered_hosts.get(host) {
+                    (Arc::clone(&info.bandwidth), info.cancellation_token.clone())
                 } else {
                     debug!("Can't get bandwith meters for unknown host {}", host);
                     continue;
@@ -201,13 +209,19 @@ impl Proxy {
                     // is in the buffer at this point in time anyway.
 
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            io::copy_bidirectional(&mut frontend_con, &mut backend_con).await
-                        {
-                            debug!(
-                                "Error while proxying data between frontend and backend: {}",
-                                e
-                            );
+                        select! {
+                            biased;
+                            _ = token.cancelled() => {
+                                trace!("Cancelling proxy as token is cancelled");
+                            }
+                            res = io::copy_bidirectional(&mut frontend_con, &mut backend_con) => {
+                                if let Err(e) = res {
+                                    debug!(
+                                        "Error while proxying data between frontend and backend: {}",
+                                        e
+                                    );
+                                }
+                            }
                         }
                     });
                 }
@@ -250,10 +264,10 @@ impl Proxy {
             let (buffer, buf_size, mut frontend_con) = sniffer.into_parts();
 
             // Scope this, so we drop the read lock on registered hosts early.
-            let bandwidth = {
+            let (bandwidth, token) = {
                 let registered_hosts = self.registered_hosts.read().await;
-                if let Some((_, bandwidth)) = registered_hosts.get(host) {
-                    Arc::clone(bandwidth)
+                if let Some(info) = registered_hosts.get(host) {
+                    (Arc::clone(&info.bandwidth), info.cancellation_token.clone())
                 } else {
                     debug!("Can't get bandwith meters for unknown host {}", host);
                     continue;
@@ -282,13 +296,19 @@ impl Proxy {
                     // is in the buffer at this point in time anyway.
 
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            io::copy_bidirectional(&mut frontend_con, &mut backend_con).await
-                        {
-                            debug!(
-                                "Error while proxying data between frontend and backend: {}",
-                                e
-                            );
+                        select! {
+                            biased;
+                            _ = token.cancelled() => {
+                                trace!("Cancelling proxy as token is cancelled");
+                            }
+                            res = io::copy_bidirectional(&mut frontend_con, &mut backend_con) => {
+                                if let Err(e) = res {
+                                    debug!(
+                                        "Error while proxying data between frontend and backend: {}",
+                                        e
+                                    );
+                                }
+                            }
                         }
                     });
                 }
@@ -308,19 +328,26 @@ impl Proxy {
         secret_hash: SecretHash,
     ) -> Result<(), DuplicateHostRegistration> {
         let mut registered_hosts = self.registered_hosts.write().await;
-        if let Some((known_secret, _)) = registered_hosts.get(&host) {
-            if known_secret != &secret_hash {
+        if let Some(info) = registered_hosts.get(&host) {
+            if info.secret_hash != secret_hash {
                 return Err(DuplicateHostRegistration {
                     host,
                     secret_hash,
-                    old_secret_hash: *known_secret,
+                    old_secret_hash: info.secret_hash,
                 });
             }
         }
         // It is technically possible that the host is already registered, but then the secret is
         // the same (we checked for a __different__ secret above), so we will silently ignore that
         // and allow this as a NOOP.
-        registered_hosts.insert(host, (secret_hash, Arc::new(Bandwidth::new())));
+        registered_hosts.insert(
+            host,
+            HostInfo {
+                secret_hash,
+                bandwidth: Arc::new(Bandwidth::new()),
+                cancellation_token: CancellationToken::new(),
+            },
+        );
         Ok(())
     }
 
@@ -332,7 +359,12 @@ impl Proxy {
         let mut registered_hosts = self.registered_hosts.write().await;
         let mut connected_hosts = self.connected_hosts.write().await;
         connected_hosts.remove(host);
-        registered_hosts.remove(host)
+        if let Some(host_info) = registered_hosts.remove(host) {
+            host_info.cancellation_token.cancel();
+            Some((host_info.secret_hash, host_info.bandwidth))
+        } else {
+            None
+        }
     }
 
     /// List all currently known hosts on the server allong with their secrets and bandwidth stats.
@@ -340,7 +372,13 @@ impl Proxy {
         let registered_hosts = self.registered_hosts.read().await;
         registered_hosts
             .iter()
-            .map(|(host, (secret, bandwidth))| (host.clone(), *secret, Arc::clone(bandwidth)))
+            .map(|(host, host_info)| {
+                (
+                    host.clone(),
+                    host_info.secret_hash,
+                    Arc::clone(&host_info.bandwidth),
+                )
+            })
             .collect()
     }
 
@@ -354,11 +392,11 @@ impl Proxy {
     ) -> Result<(), ProxyClientError<'a>> {
         let secret_hash = Hasher::digest(secret);
         let registered_hosts = self.registered_hosts.read().await;
-        let (registered_secret_hash, _) = match registered_hosts.get(host) {
+        let host_info = match registered_hosts.get(host) {
             Some(value) => value,
             None => return Err(ProxyClientError::UnknownHost { host }),
         };
-        if secret_hash.as_slice() != registered_secret_hash {
+        if secret_hash.as_slice() != host_info.secret_hash {
             return Err(ProxyClientError::WrongSecret);
         }
         // Aquire a write lock on connected_remotes to insert the new connection. Note we still
@@ -387,11 +425,11 @@ impl Proxy {
     ) -> Result<(), ProxyClientError<'a>> {
         let secret_hash = Hasher::digest(secret);
         let registered_hosts = self.registered_hosts.blocking_read();
-        let (registered_secret_hash, _) = match registered_hosts.get(host) {
+        let host_info = match registered_hosts.get(host) {
             Some(value) => value,
             None => return Err(ProxyClientError::UnknownHost { host }),
         };
-        if secret_hash.as_slice() != registered_secret_hash {
+        if secret_hash.as_slice() != host_info.secret_hash {
             return Err(ProxyClientError::WrongSecret);
         }
         // Aquire a write lock on connected_remotes to insert the new connection. Note we still

@@ -1876,6 +1876,7 @@ dependencies = [
  "serde",
  "sha2",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",
