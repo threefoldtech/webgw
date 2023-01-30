@@ -34,6 +34,7 @@ const DEFAULT_SERVER_API_PORT: u16 = 8080;
 ///
 /// Command line options for the server.
 #[derive(Parser)]
+#[command(author, version, about, long_about)]
 struct Opts {
     /// IP used for the jsonrpc p2p communication. This is IP must be reachable for clients.
     #[arg(long, default_value_t = DEFALT_RPC_IP)]

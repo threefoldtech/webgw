@@ -9,6 +9,7 @@ use webgw::core::CoreClient;
 ///
 /// Command line options for the client.
 #[derive(Parser)]
+#[command(author, version, about, long_about)]
 struct Opts {
     /// Path to the configuration file.
     #[arg(short, long)]
